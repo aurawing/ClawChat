@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ClawChat</string>
+    <string name="title_activity_main">ClawChat</string>
+    <string name="package_name">com.clawchat.app</string>
+    <string name="custom_url_scheme">com.clawchat.app</string>
+</resources>

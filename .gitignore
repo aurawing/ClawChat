@@ -1,0 +1,46 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.apk
+
+# Android 构建产物（android/ 目录本身需要 git 管理）
+android/app/build/
+android/.gradle/
+android/build/
+android/capacitor-cordova-android-plugins/build/
+android/capacitor-android/build/
+android/.idea/
+android/local.properties
+android/*.iml
+android/**/*.iml
+
+# iOS 构建产物
+ios/App/Pods/
+ios/DerivedData/
+ios/build/
+
+# 服务端运行时生成文件
+server/.env
+server/.device-key.json
+server/node_modules
