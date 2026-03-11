@@ -367,7 +367,16 @@ app.get('/health', (req, res) => {
 app.post('/api/connect', async (req, res) => {
   const { token } = req.body || {};
   if (!validateToken(token)) {
-    return res.status(401).json({ ok: false, error: '认证失败：无效的 token' });
+    return res.status(401).json({ ok: false, error: '认证失败：无效的连接密码' });
+  }
+
+  // 前置检查：Gateway 认证信息是否配置
+  if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword) {
+    log.error('Gateway 认证未配置，拒绝连接请求');
+    return res.status(502).json({
+      ok: false,
+      error: 'Gateway 认证未配置：请在服务器的 server/.env 中设置 OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_GATEWAY_PASSWORD',
+    });
   }
 
   const sid = randomUUID();
@@ -434,16 +443,18 @@ app.post('/api/connect', async (req, res) => {
     cleanupSession(sid);
 
     let userError = e.message;
+    let statusCode = 502;
     if (/ECONNREFUSED/.test(userError)) {
       userError = 'OpenClaw 服务未启动，请先在电脑上启动 OpenClaw 后再连接';
     } else if (/ETIMEDOUT|EHOSTUNREACH/.test(userError)) {
       userError = '无法连接到 OpenClaw 服务，请检查网络或 Gateway 地址配置';
     } else if (/连接超时/.test(userError)) {
       userError = '连接超时，请检查 OpenClaw 是否正在运行';
-    } else if (/握手失败/.test(userError)) {
-      userError = 'Gateway 认证失败，请检查 server/.env 中的 OPENCLAW_GATEWAY_TOKEN 配置';
+    } else if (/unauthorized|token missing|auth.*token|握手失败/i.test(userError)) {
+      userError = 'Gateway 认证失败：请在服务器的 server/.env 中配置 OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_GATEWAY_PASSWORD';
+      statusCode = 502;
     }
-    res.status(502).json({ ok: false, error: userError });
+    res.status(statusCode).json({ ok: false, error: userError });
   }
 });
 
@@ -620,13 +631,43 @@ if (existsSync(CONFIG.distPath)) {
 const server = createServer(app);
 
 server.listen(CONFIG.port, () => {
-  log.info(`代理服务端已启动: http://0.0.0.0:${CONFIG.port}`);
-  log.info(`架构: 手机 ←SSE+POST→ 代理服务端 ←WS→ Gateway(${CONFIG.gatewayUrl})`);
-  log.info(`设备 ID: ${deviceKey.deviceId.slice(0, 12)}...`);
+  console.log('');
+  console.log('╔════════════════════════════════════════════════════════╗');
+  console.log('║         ✅ ClawChat 代理服务已启动成功！              ║');
+  console.log('╠════════════════════════════════════════════════════════╣');
+  console.log(`║  端口:         ${String(CONFIG.port).padEnd(40)}║`);
+  console.log(`║  绑定地址:     0.0.0.0（公网可访问）                  ║`);
+  console.log(`║  Gateway 地址: ${CONFIG.gatewayUrl.padEnd(40)}║`);
   if (CONFIG.proxyToken) {
-    log.info('连接密码已配置');
+    console.log(`║  连接 Token:   ${CONFIG.proxyToken.padEnd(40)}║`);
   } else {
-    log.warn('未设置连接密码 (PROXY_TOKEN)，所有连接将被允许');
+    console.log('║  连接 Token:   (未设置, 任何人可连接)                ║');
+  }
+  if (CONFIG.gatewayToken || CONFIG.gatewayPassword) {
+    console.log(`║  Gateway 认证: ✅ 已配置                             ║`);
+  } else {
+    console.log('║  Gateway 认证: ❌ 未配置                             ║');
+  }
+  console.log(`║  设备 ID:      ${deviceKey.deviceId.slice(0, 32)}...   ║`);
+  console.log('╚════════════════════════════════════════════════════════╝');
+  console.log('');
+
+  if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword) {
+    console.log('');
+    console.log('⚠️  警告: 未配置 Gateway 认证信息！');
+    console.log('   大多数 OpenClaw Gateway 需要认证才能连接。');
+    console.log('   请编辑 server/.env 文件，设置以下其中一项：');
+    console.log('     OPENCLAW_GATEWAY_TOKEN=你的Gateway-Token');
+    console.log('     OPENCLAW_GATEWAY_PASSWORD=你的Gateway密码');
+    console.log('');
+    console.log('   如何获取 Gateway Token:');
+    console.log('   - 打开 OpenClaw 客户端 → 设置 → Gateway → 复制 Token');
+    console.log('   - 或查看 OpenClaw 配置文件中的 auth.token 字段');
+    console.log('');
+  }
+
+  if (!CONFIG.proxyToken) {
+    log.warn('未设置连接密码 (PROXY_TOKEN)，所有客户端连接将被允许');
   }
 });
 
