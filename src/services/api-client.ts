@@ -9,6 +9,7 @@ import type { ConnectionStatus, GatewayMessage } from '../types';
 
 const REQUEST_TIMEOUT = 30000;
 const MAX_RECONNECT_DELAY = 30000;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 /** 推断 baseUrl 协议 */
 function resolveBaseUrl(host: string): string {
@@ -120,17 +121,12 @@ export class ApiClient {
         const msg = data.error || '连接失败';
         if (res.status === 401) {
           this._setConnected(false, 'auth_failed', msg);
-          this._readyCallbacks.forEach((fn) => {
-            try {
-              fn(null, null, { error: true, message: msg });
-            } catch (_e) {
-              /* ignore */
-            }
-          });
+          this._notifyReadyError(msg);
           return;
         }
         if (res.status === 502) {
           this._setConnected(false, 'error', msg);
+          this._notifyReadyError(msg);
           return;
         }
         throw new Error(msg);
@@ -159,8 +155,14 @@ export class ApiClient {
       });
     } catch (e) {
       console.error('[api] connect error:', e);
-      this._setConnected(false, 'error', (e as Error).message);
-      if (!this._intentionalClose) this._scheduleReconnect();
+      const errMsg = (e as Error).message;
+      if (!this._intentionalClose && this._reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        this._scheduleReconnect();
+      } else {
+        // 达到最大重试次数或主动断开，停止重连
+        this._setConnected(false, 'error', errMsg);
+        this._notifyReadyError(errMsg);
+      }
     }
   }
 
@@ -385,6 +387,16 @@ export class ApiClient {
 
   // ==================== 内部辅助 ====================
 
+  private _notifyReadyError(msg: string): void {
+    this._readyCallbacks.forEach((fn) => {
+      try {
+        fn(null, null, { error: true, message: msg });
+      } catch (_e) {
+        /* ignore */
+      }
+    });
+  }
+
   private _setConnected(val: boolean, status?: ConnectionStatus, errorMsg?: string): void {
     this._connected = val;
     this._onStatusChange?.(
@@ -415,6 +427,11 @@ export class ApiClient {
 
   private _scheduleReconnect(): void {
     this._clearReconnectTimer();
+    if (this._reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      this._setConnected(false, 'error', `连接失败，已重试 ${MAX_RECONNECT_ATTEMPTS} 次`);
+      this._notifyReadyError(`连接失败，已重试 ${MAX_RECONNECT_ATTEMPTS} 次`);
+      return;
+    }
     const delay =
       this._reconnectAttempts < 3
         ? 1000

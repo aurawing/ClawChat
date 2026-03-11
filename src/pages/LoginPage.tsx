@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useChatStore } from '../stores/chatStore';
+import { apiClient } from '../services/api-client';
 import type { ServerConfig } from '../types';
 
 /**
@@ -39,6 +40,11 @@ export default function LoginPage() {
     connect(config);
   }, [host, token, connect]);
 
+  /** 停止重连 */
+  const handleStopReconnect = useCallback(() => {
+    apiClient.disconnect();
+  }, []);
+
   // 自动连接（如果有保存的配置）
   useEffect(() => {
     try {
@@ -77,7 +83,8 @@ export default function LoginPage() {
             value={host}
             onChange={(e) => setHost(e.target.value)}
             placeholder="192.168.1.100:3210"
-            className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors"
+            disabled={isConnecting}
+            className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
             onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
           />
           <p className="text-xs text-neutral-600 mt-1">
@@ -94,7 +101,8 @@ export default function LoginPage() {
               value={token}
               onChange={(e) => setToken(e.target.value)}
               placeholder="server/.env 中的 PROXY_TOKEN"
-              className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 pr-11 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors"
+              disabled={isConnecting}
+              className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 pr-11 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
               onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
             />
             <button
@@ -116,28 +124,46 @@ export default function LoginPage() {
         </div>
 
         {/* 连接按钮 */}
-        <button
-          onClick={handleConnect}
-          disabled={!host.trim() || isConnecting}
-          className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-neutral-700 disabled:to-neutral-700 text-white font-medium text-sm transition-all disabled:cursor-not-allowed"
-        >
-          {isConnecting ? (
-            <span className="flex items-center justify-center gap-2">
-              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              连接中...
-            </span>
-          ) : (
-            '连接'
-          )}
-        </button>
+        {isConnecting ? (
+          <div className="space-y-2">
+            <button
+              disabled
+              className="w-full py-3 rounded-xl bg-neutral-700 text-white font-medium text-sm cursor-not-allowed"
+            >
+              <span className="flex items-center justify-center gap-2">
+                <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                {connectionStatus === 'reconnecting' ? '重连中...' : '连接中...'}
+              </span>
+            </button>
+            <button
+              onClick={handleStopReconnect}
+              className="w-full py-2 rounded-xl border border-neutral-700 text-neutral-400 hover:text-white hover:border-neutral-500 text-sm transition-colors"
+            >
+              取消
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={handleConnect}
+            disabled={!host.trim()}
+            className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-neutral-700 disabled:to-neutral-700 text-white font-medium text-sm transition-all disabled:cursor-not-allowed"
+          >
+            {showError ? '重试' : '连接'}
+          </button>
+        )}
 
         {/* 错误提示 */}
         {showError && (
-          <div className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 text-red-300 text-sm text-center">
-            {errorMessage || (connectionStatus === 'auth_failed' ? '认证失败，请检查连接密码' : '连接失败，请检查服务器地址')}
+          <div className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 text-red-300 text-sm">
+            <p className="font-medium mb-1">
+              {connectionStatus === 'auth_failed' ? '🔒 认证失败' : '❌ 连接失败'}
+            </p>
+            <p className="text-red-400/80 text-xs">
+              {errorMessage || (connectionStatus === 'auth_failed' ? '请检查连接密码是否正确' : '请检查服务器地址和网络')}
+            </p>
           </div>
         )}
       </div>
