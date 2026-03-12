@@ -12,6 +12,7 @@ export type ConnectionStatus =
   | 'connecting'
   | 'connected'
   | 'ready' // Gateway 已就绪
+  | 'pairing_pending' // 设备等待配对批准
   | 'reconnecting'
   | 'auth_failed'
   | 'error';

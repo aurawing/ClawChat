@@ -28,6 +28,7 @@ export default function LoginPage() {
   const [showToken, setShowToken] = useState(false);
 
   const isConnecting = connectionStatus === 'connecting' || connectionStatus === 'reconnecting';
+  const isPairingPending = connectionStatus === 'pairing_pending';
 
   const handleConnect = useCallback(() => {
     if (!host.trim()) return;
@@ -83,7 +84,7 @@ export default function LoginPage() {
             value={host}
             onChange={(e) => setHost(e.target.value)}
             placeholder="192.168.1.100:3210"
-            disabled={isConnecting}
+            disabled={isConnecting || isPairingPending}
             className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
             onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
           />
@@ -101,7 +102,7 @@ export default function LoginPage() {
               value={token}
               onChange={(e) => setToken(e.target.value)}
               placeholder="server/.env 中的 PROXY_TOKEN"
-              disabled={isConnecting}
+              disabled={isConnecting || isPairingPending}
               className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 pr-11 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
               onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
             />
@@ -124,7 +125,7 @@ export default function LoginPage() {
         </div>
 
         {/* 连接按钮 */}
-        {isConnecting ? (
+        {isPairingPending ? null : isConnecting ? (
           <div className="space-y-2">
             <button
               disabled
@@ -153,6 +154,39 @@ export default function LoginPage() {
           >
             {showError ? '重试' : '连接'}
           </button>
+        )}
+
+        {/* 配对等待提示 */}
+        {isPairingPending && (
+          <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-4 text-amber-300 text-sm">
+            <div className="flex items-center gap-2 mb-2">
+              <svg className="w-4 h-4 animate-spin flex-shrink-0" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <p className="font-medium">🔗 等待设备配对批准</p>
+            </div>
+            <p className="text-amber-400/80 text-xs mb-3 leading-relaxed">
+              代理服务首次连接 OpenClaw Gateway 时需要配对批准。
+              请前往 <strong>OpenClaw 控制台</strong> 的
+              <strong> Nodes → Devices </strong>
+              页面批准此设备的连接。
+            </p>
+            {apiClient.deviceId && (
+              <div className="bg-amber-500/5 border border-amber-500/10 rounded-lg px-3 py-2">
+                <p className="text-amber-400/60 text-xs mb-1">设备 ID:</p>
+                <p className="text-amber-300/90 text-xs font-mono break-all select-all">
+                  {apiClient.deviceId}
+                </p>
+              </div>
+            )}
+            <button
+              onClick={handleStopReconnect}
+              className="w-full mt-3 py-2 rounded-xl border border-amber-500/30 text-amber-400 hover:text-amber-200 hover:border-amber-500/50 text-xs transition-colors"
+            >
+              取消连接
+            </button>
+          </div>
         )}
 
         {/* 错误提示 */}

@@ -101,6 +101,7 @@ const REQUEST_TIMEOUT = 30000;
 const CONNECT_TIMEOUT = 10000;
 const GATEWAY_RETRY_COUNT = 3;
 const GATEWAY_RETRY_DELAY = 1000;
+const PAIRING_RETRY_INTERVAL = 5000;
 
 // ==================== 会话管理 ====================
 const sessions = new Map();
@@ -161,6 +162,40 @@ function sseWrite(session, event, data) {
   }
 }
 
+/** 开始配对重试 */
+function startPairingRetry(sid) {
+  const session = sessions.get(sid);
+  if (!session) return;
+  stopPairingRetry(sid);
+  log.info(`开始配对轮询 [${sid}]，每 ${PAIRING_RETRY_INTERVAL / 1000}s 重试一次`);
+  session._pairingRetryTimer = setInterval(() => {
+    const s = sessions.get(sid);
+    if (!s || s.state !== 'pairing_pending') {
+      stopPairingRetry(sid);
+      return;
+    }
+    if (s.upstream?.readyState === WebSocket.OPEN) {
+      log.info(`配对重试 connect [${sid}]`);
+      s.upstream.send(JSON.stringify(createConnectFrame('')));
+    } else {
+      log.warn(`配对重试时 WS 已断开 [${sid}]`);
+      stopPairingRetry(sid);
+      sseWrite(s, 'proxy.error', { message: 'Gateway 连接已断开，配对中止' });
+      cleanupSession(sid);
+    }
+  }, PAIRING_RETRY_INTERVAL);
+}
+
+/** 停止配对重试 */
+function stopPairingRetry(sid) {
+  const session = sessions.get(sid);
+  if (!session) return;
+  if (session._pairingRetryTimer) {
+    clearInterval(session._pairingRetryTimer);
+    session._pairingRetryTimer = null;
+  }
+}
+
 /** 清理会话 */
 function cleanupSession(sid) {
   const session = sessions.get(sid);
@@ -170,6 +205,7 @@ function cleanupSession(sid) {
   if (session._sseHeartbeat) clearInterval(session._sseHeartbeat);
   if (session._connectTimer) clearTimeout(session._connectTimer);
   if (session._lingerTimer) clearTimeout(session._lingerTimer);
+  if (session._pairingRetryTimer) clearInterval(session._pairingRetryTimer);
   if (session.sseRes && !session.sseRes.writableEnded) {
     session.sseRes.end();
   }
@@ -241,9 +277,55 @@ function handleUpstreamMessage(sid, rawData) {
   // connect 响应
   if (message.type === 'res' && message.id?.startsWith('connect-')) {
     if (!message.ok || message.error) {
+      const errMsg = message.error?.message || message.error?.code || '';
+
+      // ===== 处理配对请求 =====
+      if (/pairing/i.test(errMsg)) {
+        if (session.state === 'pairing_pending') {
+          // 仍在等待配对，忽略（定时器会继续重试）
+          log.debug(`仍在等待配对 [${sid}]`);
+          return;
+        }
+        // 首次收到 pairing required
+        log.info(`设备需要配对 [${sid}], deviceId: ${deviceKey.deviceId}`);
+        session.state = 'pairing_pending';
+        session._connectResolve?.({ state: 'pairing_pending', deviceId: deviceKey.deviceId });
+        startPairingRetry(sid);
+        return;
+      }
+
+      // ===== 配对期间收到其他错误 =====
+      if (session.state === 'pairing_pending') {
+        log.warn(`配对期间收到错误 [${sid}]: ${errMsg}`);
+        // 不中断配对，继续重试
+        return;
+      }
+
       log.error(`Gateway 握手失败 [${sid}]:`, message.error || '未知错误');
-      session._connectReject?.(new Error(message.error?.message || 'Gateway 握手失败'));
+      session._connectReject?.(new Error(errMsg || 'Gateway 握手失败'));
     } else {
+      // ===== 配对成功 =====
+      if (session.state === 'pairing_pending') {
+        log.info(`设备配对成功！[${sid}]`);
+        stopPairingRetry(sid);
+        session.state = 'connected';
+        session.hello = message.payload;
+        session.snapshot = message.payload?.snapshot || null;
+
+        const defaults = session.snapshot?.sessionDefaults;
+        const sessionKey = defaults?.mainSessionKey || `agent:${defaults?.defaultAgentId || 'main'}:main`;
+
+        // 通过 SSE 通知客户端配对成功
+        sseWrite(session, 'proxy.paired', {
+          message: '设备配对成功',
+          snapshot: session.snapshot,
+          hello: session.hello,
+          sessionKey,
+        });
+        return;
+      }
+
+      // ===== 正常握手成功 =====
       log.info(`Gateway 握手成功 [${sid}]`);
       session.state = 'connected';
       session.hello = message.payload;
@@ -267,7 +349,7 @@ function connectToGateway(sid) {
   if (!session) return Promise.reject(new Error('会话不存在'));
 
   return new Promise((resolve, reject) => {
-    session._connectResolve = resolve;
+    session._connectResolve = (result) => resolve(result || { state: 'connected' });
     session._connectReject = reject;
 
     log.info(`连接到 Gateway: ${CONFIG.gatewayUrl} [${sid}]`);
@@ -291,8 +373,14 @@ function connectToGateway(sid) {
     upstream.on('message', (data) => handleUpstreamMessage(sid, data.toString()));
 
     upstream.on('close', (code, reason) => {
-      log.warn(`上游连接关闭 [${sid}] code=${code}`);
-      if (session.state !== 'connected') {
+      log.warn(`上游连接关闭 [${sid}] code=${code} state=${session.state}`);
+      if (session.state === 'pairing_pending') {
+        // 配对期间 WS 断开
+        log.warn(`配对期间 WS 断开 [${sid}]`);
+        stopPairingRetry(sid);
+        sseWrite(session, 'proxy.error', { message: 'Gateway 连接断开，配对中止' });
+        cleanupSession(sid);
+      } else if (session.state !== 'connected') {
         reject(new Error(`Gateway 连接关闭: ${code}`));
       } else {
         sseWrite(session, 'proxy.disconnect', { message: 'Gateway 连接已断开', code });
@@ -398,6 +486,7 @@ app.post('/api/connect', async (req, res) => {
     _heartbeat: null,
     _lingerTimer: null,
     _sseHeartbeat: null,
+    _pairingRetryTimer: null,
   };
   sessions.set(sid, session);
 
@@ -433,6 +522,18 @@ app.post('/api/connect', async (req, res) => {
 
     if (lastError) throw lastError;
 
+    // ===== 配对待批准：返回 pairing_pending 状态 =====
+    if (session.state === 'pairing_pending') {
+      log.info(`会话建立成功（等待配对）[${sid}], deviceId: ${deviceKey.deviceId}`);
+      return res.json({
+        ok: true,
+        sid,
+        state: 'pairing_pending',
+        deviceId: deviceKey.deviceId,
+      });
+    }
+
+    // ===== 正常连接成功 =====
     const defaults = session.snapshot?.sessionDefaults;
     const sessionKey = defaults?.mainSessionKey || `agent:${defaults?.defaultAgentId || 'main'}:main`;
 

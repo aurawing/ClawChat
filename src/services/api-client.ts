@@ -45,6 +45,8 @@ export class ApiClient {
   private _es: EventSource | null = null;
   private _connected = false;
   private _gatewayReady = false;
+  private _pairingPending = false;
+  private _deviceId: string | null = null;
   private _intentionalClose = false;
   private _onStatusChange: StatusChangeHandler | null = null;
   private _snapshot: Record<string, unknown> | null = null;
@@ -63,6 +65,12 @@ export class ApiClient {
   }
   get gatewayReady(): boolean {
     return this._gatewayReady;
+  }
+  get pairingPending(): boolean {
+    return this._pairingPending;
+  }
+  get deviceId(): string | null {
+    return this._deviceId;
   }
   get snapshot(): Record<string, unknown> | null {
     return this._snapshot;
@@ -133,10 +141,27 @@ export class ApiClient {
       }
 
       this._sid = data.sid;
+      this._lastSseEventId = 0;
+
+      // ===== 配对待批准：等待 SSE 通知 =====
+      if (data.state === 'pairing_pending') {
+        this._pairingPending = true;
+        this._deviceId = data.deviceId || null;
+        this._connected = false;
+        this._gatewayReady = false;
+        this._reconnectAttempts = 0;
+        this._setConnected(false, 'pairing_pending');
+        // 开启 SSE 事件流监听配对结果
+        this._setupEventSource();
+        return;
+      }
+
+      // ===== 正常连接成功 =====
       this._hello = data.hello;
       this._snapshot = data.snapshot;
       this._sessionKey = data.sessionKey;
-      this._lastSseEventId = 0;
+      this._pairingPending = false;
+      this._deviceId = null;
 
       // 2. 开启 SSE 事件流
       this._setupEventSource();
@@ -208,10 +233,45 @@ export class ApiClient {
       }
     });
 
+    // proxy.paired（配对成功）
+    es.addEventListener('proxy.paired', (evt: MessageEvent) => {
+      if (esId !== this._esId) return;
+      console.log('[api] 设备配对成功！');
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(evt.data); } catch { /* ignore */ }
+      this._hello = (data.hello as Record<string, unknown>) || null;
+      this._snapshot = (data.snapshot as Record<string, unknown>) || null;
+      this._sessionKey = (data.sessionKey as string) || null;
+      this._pairingPending = false;
+      this._deviceId = null;
+      this._gatewayReady = true;
+      this._connected = true;
+      this._reconnectAttempts = 0;
+      this._setConnected(true, 'ready');
+      this._readyCallbacks.forEach((fn) => {
+        try { fn(this._hello, this._sessionKey); } catch { /* ignore */ }
+      });
+    });
+
+    // proxy.error（服务端推送错误）
+    es.addEventListener('proxy.error', (evt: MessageEvent) => {
+      if (esId !== this._esId) return;
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(evt.data); } catch { /* ignore */ }
+      const msg = (data.message as string) || '连接错误';
+      console.error('[api] proxy.error:', msg);
+      if (this._pairingPending) {
+        this._pairingPending = false;
+        this._setConnected(false, 'error', msg);
+        this._notifyReadyError(msg);
+      }
+    });
+
     // proxy.disconnect（Gateway 断开）
     es.addEventListener('proxy.disconnect', () => {
       if (esId !== this._esId) return;
       this._gatewayReady = false;
+      this._pairingPending = false;
       this._setConnected(false, 'disconnected');
       this._closeEventSource();
       if (!this._intentionalClose) this._scheduleReconnect();
@@ -219,7 +279,9 @@ export class ApiClient {
 
     es.onerror = () => {
       if (esId !== this._esId) return;
-      if (this._gatewayReady) {
+      if (this._pairingPending) {
+        console.log('[api] SSE 断开（配对等待中），等待自动重连...');
+      } else if (this._gatewayReady) {
         console.log('[api] SSE 断开，等待自动重连...');
       }
     };
@@ -239,6 +301,8 @@ export class ApiClient {
     }
     this._sid = null;
     this._gatewayReady = false;
+    this._pairingPending = false;
+    this._deviceId = null;
     this._setConnected(false, 'disconnected');
   }
 
