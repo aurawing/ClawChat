@@ -247,16 +247,13 @@ function cleanupSession(sid) {
   sessions.delete(sid);
 }
 
-/** 为用户生成隔离的 sessionKey */
+/** 为用户生成隔离的 sessionKey（使用 clawchat- 前缀，便于过滤非本应用的会话） */
 function getUserSessionKey(userId) {
   const base = gw.defaultSessionKey || 'agent:main:main';
-  if (!userId || !MULTI_USER) return base;
-  // agent:agentId:channel → agent:agentId:user-{userId}
   const parts = base.split(':');
-  if (parts.length >= 3) {
-    return `${parts[0]}:${parts[1]}:user-${userId}`;
-  }
-  return `agent:main:user-${userId}`;
+  const prefix = parts.length >= 2 ? `${parts[0]}:${parts[1]}` : 'agent:main';
+  const userTag = userId || 'default';
+  return `${prefix}:clawchat-${userTag}`;
 }
 
 // ==================== 共享 Gateway 消息处理 ====================
@@ -834,7 +831,33 @@ app.post('/api/send', async (req, res) => {
   if (params?.sessionKey) session.sessionKeys.add(params.sessionKey);
 
   try {
-    const result = await sendGatewayRPC(sid, method, params);
+    let result = await sendGatewayRPC(sid, method, params);
+
+    // ====== 过滤 sessions.list，只返回 ClawChat 创建的会话（带 clawchat- 前缀） ======
+    if (method === 'sessions.list') {
+      const userId = session.userId || session.username || 'default';
+      const filterSession = (s) => {
+        const key = s?.key || s?.sessionKey || '';
+        // 必须是 ClawChat 创建的会话
+        if (!key.includes(':clawchat-')) return false;
+        // 始终按用户隔离（不仅限多用户模式）
+        if (userId) return key.includes(`:clawchat-${userId}`);
+        return true;
+      };
+
+      if (result?.sessions && Array.isArray(result.sessions)) {
+        log.debug(`sessions.list 过滤前: ${result.sessions.length} 条, userId=${userId}`);
+        result = { ...result, sessions: result.sessions.filter(filterSession) };
+        log.debug(`sessions.list 过滤后: ${result.sessions.length} 条`);
+      } else if (result?.items && Array.isArray(result.items)) {
+        result = { ...result, items: result.items.filter(filterSession) };
+      } else if (Array.isArray(result)) {
+        result = result.filter(filterSession);
+      } else {
+        log.debug(`sessions.list 响应格式未知: ${JSON.stringify(result).substring(0, 300)}`);
+      }
+    }
+
     res.json({ ok: true, payload: result });
   } catch (e) {
     if (/Gateway 未连接/.test(e.message)) {

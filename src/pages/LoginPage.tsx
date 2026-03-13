@@ -71,14 +71,14 @@ export default function LoginPage() {
   const showError = connectionStatus === 'error' || connectionStatus === 'auth_failed';
 
   return (
-    <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center p-6">
+    <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center p-6 safe-area-top safe-area-bottom">
       {/* Logo */}
       <div className="mb-8 text-center">
-        <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/20">
-          <svg className="w-9 h-9 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-          </svg>
-        </div>
+        <img
+          src="/icon-192.png"
+          alt="ClawChat"
+          className="w-20 h-20 mx-auto mb-4 rounded-2xl shadow-lg shadow-emerald-500/20"
+        />
         <h1 className="text-2xl font-bold text-white">ClawChat</h1>
         <p className="text-sm text-neutral-400 mt-1">连接到 OpenClaw 服务</p>
       </div>

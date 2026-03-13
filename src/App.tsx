@@ -3,10 +3,10 @@ import LoginPage from './pages/LoginPage';
 import ChatPage from './pages/ChatPage';
 
 export default function App() {
-  const { connectionStatus } = useChatStore();
+  const { connectionStatus, currentSessionKey } = useChatStore();
 
-  // 已就绪才显示聊天页面
-  if (connectionStatus === 'ready' || connectionStatus === 'connected') {
+  // 仅当连接就绪 且 已获得 sessionKey 时才进入聊天页面
+  if (connectionStatus === 'ready' && currentSessionKey) {
     return <ChatPage />;
   }
 

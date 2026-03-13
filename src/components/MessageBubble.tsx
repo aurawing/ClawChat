@@ -7,12 +7,52 @@ interface MessageBubbleProps {
   message: Message;
 }
 
+/** 格式化消息时间（小字显示） */
+function formatTime(ts: number): string {
+  if (!ts) return '';
+  const d = new Date(ts);
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+
+  const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+  // 今天只显示时分
+  if (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  ) {
+    return hhmm;
+  }
+
+  // 昨天
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (
+    d.getFullYear() === yesterday.getFullYear() &&
+    d.getMonth() === yesterday.getMonth() &&
+    d.getDate() === yesterday.getDate()
+  ) {
+    return `昨天 ${hhmm}`;
+  }
+
+  // 今年只显示月-日 时:分
+  if (d.getFullYear() === now.getFullYear()) {
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`;
+  }
+
+  // 其他显示完整日期
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`;
+}
+
 /**
  * 消息气泡组件 - 根据角色和内容类型渲染不同样式
  */
 export default function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
+
+  const timeStr = formatTime(message.createdAt);
 
   // 系统消息（错误等）
   if (isSystem) {
@@ -28,7 +68,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
   // 用户消息
   if (isUser) {
     return (
-      <div className="flex justify-end mb-4">
+      <div className="flex flex-col items-end mb-4">
         <div className="max-w-[85%] space-y-2">
           {/* 附件预览 */}
           {message.attachments && message.attachments.length > 0 && (
@@ -37,9 +77,10 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                 <div key={att.id} className="relative">
                   {att.type.startsWith('image/') ? (
                     <img
-                      src={att.url || `data:${att.type};base64,${att.base64}`}
+                      src={att.url || (att.base64 ? `data:${att.type};base64,${att.base64}` : undefined)}
                       alt={att.name}
-                      className="h-20 w-20 rounded-lg object-cover border border-neutral-700"
+                      className="max-h-48 max-w-full rounded-xl border border-neutral-700 object-contain"
+                      loading="lazy"
                     />
                   ) : (
                     <div className="flex items-center gap-2 bg-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-300 border border-neutral-700">
@@ -55,10 +96,17 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
           )}
 
           {/* 消息内容 */}
-          <div className="bg-blue-600 text-white px-4 py-3 rounded-2xl rounded-br-md">
-            <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
-          </div>
+          {message.content && (
+            <div className="bg-blue-600 text-white px-4 py-3 rounded-2xl rounded-br-md">
+              <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+            </div>
+          )}
         </div>
+
+        {/* 时间 */}
+        {timeStr && (
+          <span className="text-[10px] text-neutral-500 mt-1 mr-1">{timeStr}</span>
+        )}
       </div>
     );
   }
@@ -73,34 +121,41 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
         </svg>
       </div>
 
-      <div className="max-w-[85%] space-y-1">
-        {/* 思维链 */}
-        {message.thinking && (
-          <ThinkingBlock
-            content={message.thinking}
-            isStreaming={message.isStreaming && !message.content}
-          />
-        )}
+      <div className="max-w-[85%]">
+        <div className="space-y-1">
+          {/* 思维链 */}
+          {message.thinking && (
+            <ThinkingBlock
+              content={message.thinking}
+              isStreaming={message.isStreaming && !message.content}
+            />
+          )}
 
-        {/* 工具调用 */}
-        {message.toolCalls && message.toolCalls.length > 0 && (
-          <div className="space-y-1">
-            {message.toolCalls.map((tc) => (
-              <ToolCallBlock key={tc.id} toolCall={tc} />
-            ))}
-          </div>
-        )}
+          {/* 工具调用 */}
+          {message.toolCalls && message.toolCalls.length > 0 && (
+            <div className="space-y-1">
+              {message.toolCalls.map((tc) => (
+                <ToolCallBlock key={tc.id} toolCall={tc} />
+              ))}
+            </div>
+          )}
 
-        {/* 主要内容 */}
-        {message.content && (
-          <div className="text-neutral-100">
-            <MarkdownRenderer content={message.content} />
-          </div>
-        )}
+          {/* 主要内容 */}
+          {message.content && (
+            <div className="text-neutral-100">
+              <MarkdownRenderer content={message.content} />
+            </div>
+          )}
 
-        {/* 流式光标 */}
-        {message.isStreaming && (
-          <span className="inline-block w-2 h-4 bg-neutral-400 animate-pulse ml-0.5" />
+          {/* 流式光标 */}
+          {message.isStreaming && (
+            <span className="inline-block w-2 h-4 bg-neutral-400 animate-pulse ml-0.5" />
+          )}
+        </div>
+
+        {/* 时间 */}
+        {timeStr && !message.isStreaming && (
+          <span className="text-[10px] text-neutral-500 mt-1 block">{timeStr}</span>
         )}
       </div>
     </div>

@@ -30,6 +30,45 @@ function stripThinkingTags(text: string): string {
     .trim();
 }
 
+/**
+ * 去除 Gateway 注入的 operator / system 元数据前缀
+ * 以及开头的时间戳
+ */
+function stripOperatorInjectedContent(text: string): string {
+  // 去除 "Skills store policy(operator configured): ..." 块
+  text = text.replace(
+    /Skills\s+store\s+policy\s*\(operator\s+configured\)\s*:[\s\S]*?(?=\n{2,}|\n(?=[A-Z])|$)/gi,
+    ''
+  );
+  // 去除 "[system]" 前缀块
+  text = text.replace(/^\[system\][\s\S]*?(?=\n{2,}|$)/gim, '');
+  // 去除 "Conversation info" 块
+  text = text.replace(
+    /Conversation info\s*\(untrusted metadata\)\s*:?\s*```json[\s\S]*?```\s*/gi,
+    ''
+  );
+  // 去除 operator 指令前缀
+  text = text.replace(/^##\s*(?:System|Operator)\s+(?:Message|Instructions?)[\s\S]*?(?=\n{2,}|$)/gim, '');
+  return text.trim();
+}
+
+/** 去除消息开头的时间戳前缀 */
+function stripTimestampPrefix(text: string): string {
+  // [Fri 2026-03-13 05:49 UTC] 或 [Mon 2026-03-13 05:49:30 UTC] （带星期和时区）
+  text = text.replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|[A-Z]{2,5})?\]\s*/gi, '');
+  // [2026-03-13 12:00:00] 或 [2026-03-13T12:00:00.000Z]
+  text = text.replace(/^\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\]\s*/g, '');
+  // 2026-03-13 12:00:00\n 或 2026-03-13T12:00:00.000Z\n（独占一行的时间戳）
+  text = text.replace(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\s*\n/g, '');
+  // Fri 2026-03-13 05:49 UTC\n（不带方括号，带星期和时区，独占一行）
+  text = text.replace(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|[A-Z]{2,5})?\s*\n/gi, '');
+  // [12:00:00] 或 [12:00]
+  text = text.replace(/^\[\d{2}:\d{2}(?::\d{2})?\]\s*/g, '');
+  // 纯数字时间戳开头 (Unix ms) 后跟换行
+  text = text.replace(/^\d{13,}\s*\n/g, '');
+  return text.trim();
+}
+
 /** 从 Gateway 消息中提取文本内容 */
 function extractText(message?: ChatMessage): string {
   if (!message) return '';
@@ -46,6 +85,153 @@ function extractText(message?: ChatMessage): string {
   }
   if (typeof message.text === 'string') return stripThinkingTags(message.text);
   return '';
+}
+
+/** 从 Gateway 消息中提取图片和文件附件 */
+function extractAttachments(message?: ChatMessage): FileAttachment[] {
+  if (!message) return [];
+  const attachments: FileAttachment[] = [];
+
+  // 从 content blocks 提取
+  if (Array.isArray(message.content)) {
+    for (const block of message.content as ContentBlock[]) {
+      const bt = (block.type || '').toLowerCase();
+
+      // 图片类型（宽松匹配多种命名）
+      if (bt === 'image' || bt === 'image_url' || bt === 'image_block' || bt === 'photo') {
+        const url = extractImageUrl(block);
+        if (url) {
+          attachments.push({
+            id: uuid(),
+            name: block.fileName || block.name || 'image',
+            type: block.mimeType || block.source?.media_type || 'image/png',
+            size: block.size || 0,
+            url,
+          });
+        }
+      }
+      // 文件类型
+      else if (bt === 'file' || bt === 'document' || bt === 'attachment') {
+        const url = block.url || block.source?.url || '';
+        if (url) {
+          attachments.push({
+            id: uuid(),
+            name: block.fileName || block.name || 'file',
+            type: block.mimeType || 'application/octet-stream',
+            size: block.size || 0,
+            url,
+          });
+        }
+      }
+      // 如果 type 不是以上已知类型，但有图片标志性字段
+      else if (!bt || bt === 'unknown') {
+        const url = extractImageUrl(block);
+        if (url) {
+          attachments.push({
+            id: uuid(),
+            name: block.fileName || block.name || 'image',
+            type: block.mimeType || block.source?.media_type || 'image/png',
+            size: block.size || 0,
+            url,
+          });
+        }
+      }
+    }
+  }
+
+  // 从消息级 attachments 字段提取（部分 Gateway 将附件放在此处）
+  const msgAny = message as Record<string, unknown>;
+  if (Array.isArray(msgAny.attachments)) {
+    for (const att of msgAny.attachments as Record<string, unknown>[]) {
+      const url = (att.url as string) || (att.content ? `data:${att.mimeType || 'image/png'};base64,${att.content}` : '');
+      if (url) {
+        const mime = (att.mimeType as string) || (att.type as string) || 'image/png';
+        attachments.push({
+          id: uuid(),
+          name: (att.fileName as string) || (att.name as string) || 'attachment',
+          type: mime,
+          size: (att.size as number) || 0,
+          url,
+        });
+      }
+    }
+  }
+
+  // 从 mediaUrl / mediaUrls 提取
+  if (message.mediaUrl) {
+    attachments.push({
+      id: uuid(),
+      name: 'media',
+      type: guessMediaType(message.mediaUrl),
+      size: 0,
+      url: message.mediaUrl,
+    });
+  }
+  if (message.mediaUrls) {
+    for (const url of message.mediaUrls) {
+      attachments.push({
+        id: uuid(),
+        name: 'media',
+        type: guessMediaType(url),
+        size: 0,
+        url,
+      });
+    }
+  }
+
+  return attachments;
+}
+
+/** 从 ContentBlock 中提取图片 URL（支持多种格式） */
+function extractImageUrl(block: ContentBlock): string {
+  if (block.url) return block.url;
+  if (block.image_url?.url) return block.image_url.url;
+  if (block.source?.url) return block.source.url;
+  if (block.source?.data && block.source?.media_type) {
+    return `data:${block.source.media_type};base64,${block.source.data}`;
+  }
+  if (block.source?.data) {
+    return `data:image/png;base64,${block.source.data}`;
+  }
+  if (block.data && block.mimeType) {
+    return `data:${block.mimeType};base64,${block.data}`;
+  }
+  if (block.data) {
+    return `data:image/png;base64,${block.data}`;
+  }
+  return '';
+}
+
+/** 猜测 URL 的媒体类型 */
+function guessMediaType(url: string): string {
+  const lower = url.toLowerCase();
+  if (/\.jpe?g/.test(lower)) return 'image/jpeg';
+  if (/\.png/.test(lower)) return 'image/png';
+  if (/\.gif/.test(lower)) return 'image/gif';
+  if (/\.webp/.test(lower)) return 'image/webp';
+  if (/\.svg/.test(lower)) return 'image/svg+xml';
+  if (/\.pdf/.test(lower)) return 'application/pdf';
+  if (/^data:([^;]+);/.test(url)) return RegExp.$1;
+  return 'image/png'; // 默认图片
+}
+
+/** 判断是否应跳过该消息角色 */
+function shouldSkipRole(role?: string): boolean {
+  if (!role) return true;
+  const skip = new Set([
+    'operator', 'system', 'tool', 'toolResult', 'tool_result',
+    'function', 'function_call', 'developer',
+  ]);
+  return skip.has(role);
+}
+
+/** 从消息内容生成有意义的会话标题 */
+function generateSessionTitle(content: string): string {
+  // 去掉换行取第一行
+  const firstLine = content.split('\n')[0].trim();
+  if (!firstLine) return '新对话';
+  // 截断到合理长度
+  return firstLine.length > 30 ? firstLine.substring(0, 30) + '…' : firstLine;
 }
 
 // ==================== Store 类型 ====================
@@ -76,16 +262,22 @@ interface ChatState {
   // 工具调用
   toolCards: Map<string, ToolCall>;
 
+  // 中止后的操作状态
+  lastAbortedUserMsgId: string | null;
+
   // Actions
   connect: (config: ServerConfig) => void;
   disconnect: () => void;
   sendMessage: (content: string, attachments?: FileAttachment[]) => Promise<void>;
   stopGenerating: () => void;
   switchSession: (key: string) => void;
+  createNewSession: () => void;
   loadHistory: () => Promise<void>;
   loadSessions: () => Promise<void>;
   deleteSession: (key: string) => Promise<void>;
   resetSession: (key: string) => Promise<void>;
+  resendLastMessage: () => void;
+  deleteLastUserMessage: () => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => {
@@ -111,6 +303,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentAiText: text,
           currentAiMessageId: msgId,
           currentRunId: payload.runId || state.currentRunId,
+          lastAbortedUserMsgId: null,
         });
       }
       return;
@@ -148,10 +341,16 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
+          lastAbortedUserMsgId: null,
         }));
 
         // 持久化
         db.saveMessage(aiMsg);
+
+        // 如果是第一条 AI 回复, 刷新会话列表（可能生成了新标题）
+        if (state.messages.filter(m => m.role === 'assistant').length === 0) {
+          setTimeout(() => get().loadSessions(), 500);
+        }
       } else {
         set({
           isStreaming: false,
@@ -166,6 +365,9 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     if (chatState === 'aborted') {
       const currentText = state.currentAiText;
+      // 找到最后一条用户消息 ID
+      const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user');
+
       if (currentText && state.currentAiMessageId) {
         const aiMsg: Message = {
           id: state.currentAiMessageId,
@@ -182,6 +384,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
+          lastAbortedUserMsgId: lastUserMsg?.id || null,
         }));
       } else {
         set({
@@ -190,6 +393,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
+          lastAbortedUserMsgId: lastUserMsg?.id || null,
         });
       }
       return;
@@ -228,6 +432,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         set({
           isStreaming: true,
           currentRunId: payload.runId || null,
+          lastAbortedUserMsgId: null,
         });
       }
       if (data?.phase === 'end') {
@@ -320,6 +525,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     currentAiText: '',
     currentAiMessageId: null,
     toolCards: new Map(),
+    lastAbortedUserMsgId: null,
 
     connect: (config: ServerConfig) => {
       set({ serverConfig: config, errorMessage: null });
@@ -365,6 +571,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+        lastAbortedUserMsgId: null,
       });
     },
 
@@ -382,7 +589,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         attachments,
         createdAt: Date.now(),
       };
-      set((s) => ({ messages: [...s.messages, userMsg], isStreaming: true }));
+      set((s) => ({
+        messages: [...s.messages, userMsg],
+        isStreaming: true,
+        lastAbortedUserMsgId: null,
+      }));
       db.saveMessage(userMsg);
 
       // 构造 Gateway 附件格式
@@ -417,6 +628,12 @@ export const useChatStore = create<ChatState>((set, get) => {
           .chatAbort(state.currentSessionKey, state.currentRunId || undefined)
           .catch(() => {});
       }
+      // 立即更新本地状态，标记最后一条用户消息
+      const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user');
+      set({
+        isStreaming: false,
+        lastAbortedUserMsgId: lastUserMsg?.id || null,
+      });
     },
 
     switchSession: (key: string) => {
@@ -428,9 +645,35 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+        lastAbortedUserMsgId: null,
       });
       localStorage.setItem('clawchat-session-key', key);
       get().loadHistory();
+    },
+
+    /** 新建会话 - 生成唯一 sessionKey */
+    createNewSession: () => {
+      const baseKey = apiClient.sessionKey;
+      if (!baseKey) return;
+      // 从 agent:main:clawchat-xxx 提取 agent:main 前缀
+      const parts = baseKey.split(':');
+      const prefix = parts.slice(0, 2).join(':'); // 'agent:main'
+      const state = get();
+      const userTag = state.userId || state.username || 'default';
+      const suffix = Date.now().toString(36); // 短时间戳作后缀
+      const newKey = `${prefix}:clawchat-${userTag}-${suffix}`;
+
+      set({
+        currentSessionKey: newKey,
+        messages: [],
+        isStreaming: false,
+        currentAiText: '',
+        currentAiMessageId: null,
+        currentRunId: null,
+        toolCards: new Map(),
+        lastAbortedUserMsgId: null,
+      });
+      localStorage.setItem('clawchat-session-key', newKey);
     },
 
     loadHistory: async () => {
@@ -442,18 +685,67 @@ export const useChatStore = create<ChatState>((set, get) => {
         const result = (await apiClient.chatHistory(sessionKey)) as {
           messages?: ChatMessage[];
         };
-        if (!result?.messages?.length) return;
+        if (!result?.messages?.length) {
+          // Gateway 无记录，尝试加载本地 DB
+          const localMessages = await db.getMessages(sessionKey);
+          if (localMessages.length > 0) {
+            set({ messages: localMessages });
+          }
+          return;
+        }
+
+        // 先加载本地 DB 中带附件的消息，用于合并
+        const localMessages = await db.getMessages(sessionKey);
+        const localAttachmentMap = new Map<string, FileAttachment[]>();
+        for (const lm of localMessages) {
+          if (lm.attachments && lm.attachments.length > 0) {
+            // 用消息内容的前50字符作为模糊匹配 key
+            const fuzzyKey = lm.content.substring(0, 50).trim();
+            localAttachmentMap.set(lm.id, lm.attachments);
+            if (fuzzyKey) localAttachmentMap.set(`text:${fuzzyKey}`, lm.attachments);
+          }
+        }
 
         const messages: Message[] = [];
         for (const msg of result.messages) {
-          if ((msg.role as string) === 'toolResult') continue;
-          const text = extractText(msg);
-          if (!text) continue;
+          const role = msg.role as string;
+
+          // ====== 跳过非 user/assistant 的角色 ======
+          if (shouldSkipRole(role)) continue;
+          if (role !== 'user' && role !== 'assistant') continue;
+
+          let text = extractText(msg);
+
+          // ====== 对 user 消息，去除 operator 注入的内容和时间戳 ======
+          if (role === 'user') {
+            text = stripOperatorInjectedContent(text);
+            text = stripTimestampPrefix(text);
+          }
+
+          // ====== 提取附件（图片等）======
+          let attachments = extractAttachments(msg);
+
+          // 如果 Gateway 未返回附件，尝试从本地 DB 合并
+          if (attachments.length === 0 && role === 'user') {
+            const msgId = msg.id as string;
+            const fuzzyKey = text.substring(0, 50).trim();
+            const localAtts = (msgId && localAttachmentMap.get(msgId))
+              || (fuzzyKey && localAttachmentMap.get(`text:${fuzzyKey}`))
+              || undefined;
+            if (localAtts) {
+              attachments = localAtts;
+            }
+          }
+
+          // 允许仅有附件无文字的消息
+          if (!text && attachments.length === 0) continue;
+
           messages.push({
             id: (msg.id as string) || uuid(),
             sessionKey,
-            role: msg.role === 'assistant' ? 'assistant' : msg.role === 'user' ? 'user' : 'system',
+            role: role === 'assistant' ? 'assistant' : 'user',
             content: text,
+            attachments: attachments.length > 0 ? attachments : undefined,
             createdAt: msg.timestamp || Date.now(),
           });
         }
@@ -461,6 +753,13 @@ export const useChatStore = create<ChatState>((set, get) => {
         set({ messages });
       } catch (e) {
         console.error('[store] loadHistory error:', e);
+        // 出错时回退到本地 DB
+        try {
+          const localMessages = await db.getMessages(state.currentSessionKey || '');
+          if (localMessages.length > 0) {
+            set({ messages: localMessages });
+          }
+        } catch (_) { /* ignore */ }
       }
     },
 
@@ -478,12 +777,34 @@ export const useChatStore = create<ChatState>((set, get) => {
         };
         if (!result?.sessions) return;
 
-        const sessions: Session[] = result.sessions.map((s) => ({
-          key: s.key,
-          title: s.title || extractSessionTitle(s.key),
-          lastMessage: s.lastMessage,
-          updatedAt: s.updatedAt || Date.now(),
-        }));
+        // ====== 客户端侧过滤：只显示 ClawChat 创建的会话（带 clawchat- 前缀），并按用户隔离 ======
+        const state = get();
+        const currentUserId = state.userId || state.username || 'default';
+        const filteredSessions = result.sessions.filter(s => {
+          if (!s.key?.includes(':clawchat-')) return false;
+          // 按当前用户隔离
+          if (currentUserId) return s.key.includes(`:clawchat-${currentUserId}`);
+          return true;
+        });
+
+        const sessions: Session[] = filteredSessions.map((s) => {
+          // 如果没有标题或标题只是 sessionKey 则生成有意义的标题
+          let title = s.title;
+          if (!title || title === s.key || /^agent:/.test(title)) {
+            // 尝试从 lastMessage 生成标题
+            if (s.lastMessage) {
+              title = generateSessionTitle(s.lastMessage);
+            } else {
+              title = extractSessionTitle(s.key);
+            }
+          }
+          return {
+            key: s.key,
+            title,
+            lastMessage: s.lastMessage,
+            updatedAt: s.updatedAt || Date.now(),
+          };
+        });
 
         set({ sessions });
       } catch (e) {
@@ -523,6 +844,51 @@ export const useChatStore = create<ChatState>((set, get) => {
         console.error('[store] resetSession error:', e);
       }
     },
+
+    /** 重新发送最后一条用户消息 */
+    resendLastMessage: () => {
+      const state = get();
+      const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user');
+      if (!lastUserMsg) return;
+
+      // 移除最后一条用户消息及之后的所有消息
+      const idx = state.messages.findIndex(m => m.id === lastUserMsg.id);
+      const messagesBeforeLastUser = state.messages.slice(0, idx);
+      set({
+        messages: messagesBeforeLastUser,
+        isStreaming: false,
+        currentAiText: '',
+        currentAiMessageId: null,
+        currentRunId: null,
+        toolCards: new Map(),
+        lastAbortedUserMsgId: null,
+      });
+
+      // 重新发送
+      get().sendMessage(lastUserMsg.content, lastUserMsg.attachments);
+    },
+
+    /** 删除最后一条用户消息及之后的 AI 回复 */
+    deleteLastUserMessage: () => {
+      const state = get();
+      const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user');
+      if (!lastUserMsg) return;
+
+      const idx = state.messages.findIndex(m => m.id === lastUserMsg.id);
+      const messagesBeforeLastUser = state.messages.slice(0, idx);
+      set({
+        messages: messagesBeforeLastUser,
+        isStreaming: false,
+        currentAiText: '',
+        currentAiMessageId: null,
+        currentRunId: null,
+        toolCards: new Map(),
+        lastAbortedUserMsgId: null,
+      });
+
+      // 从本地 DB 删除
+      db.deleteMessage(lastUserMsg.id).catch(() => {});
+    },
   };
 });
 
@@ -531,6 +897,10 @@ function extractSessionTitle(key: string): string {
   const parts = key.split(':');
   if (parts.length >= 3) {
     const channel = parts.slice(2).join(':');
+    // clawchat-{user} 格式: 主对话
+    if (/^clawchat-[^-]+$/.test(channel)) return '主对话';
+    // clawchat-{user}-{suffix} 格式: 新对话
+    if (/^clawchat-.+-.+$/.test(channel)) return '新对话';
     if (channel === 'main') return '主对话';
     return channel.length > 20 ? channel.substring(0, 20) + '…' : channel;
   }

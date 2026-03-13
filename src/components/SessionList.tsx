@@ -6,6 +6,7 @@ interface SessionListProps {
   username?: string | null;
   onSelectSession: (key: string) => void;
   onDeleteSession: (key: string) => void;
+  onNewSession: () => void;
   onRefresh: () => void;
   onClose: () => void;
   onDisconnect?: () => void;
@@ -20,6 +21,7 @@ export default function SessionList({
   username,
   onSelectSession,
   onDeleteSession,
+  onNewSession,
   onRefresh,
   onClose,
   onDisconnect,
@@ -45,9 +47,19 @@ export default function SessionList({
   return (
     <div className="h-full flex flex-col bg-neutral-900">
       {/* 头部 */}
-      <div className="flex items-center justify-between px-4 py-4 border-b border-neutral-800">
+      <div className="flex items-center justify-between px-4 py-4 border-b border-neutral-800 safe-area-top">
         <h2 className="text-lg font-semibold text-white">会话</h2>
         <div className="flex gap-2">
+          {/* 新建会话按钮 */}
+          <button
+            onClick={onNewSession}
+            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-emerald-400"
+            title="新建对话"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+          </button>
           {/* 刷新按钮 */}
           <button
             onClick={onRefresh}
@@ -121,7 +133,7 @@ export default function SessionList({
 
       {/* 底部用户信息 */}
       {(username || onDisconnect) && (
-        <div className="border-t border-neutral-800 px-4 py-3">
+        <div className="border-t border-neutral-800 px-4 py-3 safe-area-bottom">
           <div className="flex items-center gap-3">
             {/* 用户头像 */}
             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white text-xs font-bold shrink-0">
