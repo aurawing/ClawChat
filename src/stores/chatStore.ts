@@ -353,6 +353,191 @@ interface ChatState {
   loadFirstUserMessage: (sessionKey: string) => Promise<string | null>;
 }
 
+/**
+ * 将当前流式输出中的 AI 消息（含工具调用、思维链）保存到 IndexedDB。
+ * 在切换会话 / 新建会话前调用，避免丢失正在执行中的工具调用内容。
+ */
+function _saveStreamingStateToDb(state: ChatState) {
+  const { currentAiText, currentAiThinking, currentAiMessageId, toolCards, currentSessionKey } = state;
+  const hasContent = currentAiText || currentAiThinking || toolCards.size > 0;
+  if (!hasContent || !currentAiMessageId || !currentSessionKey) return;
+
+  const partialMsg: Message = {
+    id: currentAiMessageId,
+    sessionKey: currentSessionKey,
+    role: 'assistant',
+    content: currentAiText || '',
+    thinking: currentAiThinking || undefined,
+    toolCalls: toolCards.size > 0 ? Array.from(toolCards.values()) : undefined,
+    createdAt: Date.now(),
+    isStreaming: false, // 存 DB 时标记为非流式
+  };
+  db.saveMessage(partialMsg).catch((e) =>
+    console.warn('[store] 保存流式状态失败:', e)
+  );
+}
+
+// ==================== 后台会话流式缓冲区 ====================
+// 当用户切换到其他会话时，非当前会话的 SSE 事件仍在到达。
+// 这里维护后台缓冲区，持续处理这些事件，确保切回时数据不丢失。
+interface BgStreamState {
+  msgId: string;
+  sessionKey: string;
+  text: string;
+  thinking: string;
+  toolCards: Map<string, ToolCall>;
+  createdAt: number;
+}
+const bgStreams = new Map<string, BgStreamState>();
+
+/** 处理非当前会话的 agent 事件 — 后台缓冲 */
+function _bgHandleAgentEvent(payload: AgentEventPayload) {
+  const sk = payload.sessionKey!;
+  const { stream, data } = payload;
+
+  if (stream === 'lifecycle') {
+    if (data?.phase === 'start') {
+      // 新一轮开始，初始化缓冲区
+      bgStreams.set(sk, {
+        msgId: `ai-${uuid()}`,
+        sessionKey: sk,
+        text: '',
+        thinking: '',
+        toolCards: new Map(),
+        createdAt: Date.now(),
+      });
+    }
+    if (data?.phase === 'end') {
+      // 生命周期结束，保存到 DB 并清理
+      const bg = bgStreams.get(sk);
+      if (bg && (bg.text || bg.thinking || bg.toolCards.size > 0)) {
+        const msg: Message = {
+          id: bg.msgId,
+          sessionKey: sk,
+          role: 'assistant',
+          content: bg.text,
+          thinking: bg.thinking || undefined,
+          toolCalls: bg.toolCards.size > 0 ? Array.from(bg.toolCards.values()) : undefined,
+          createdAt: bg.createdAt,
+          isStreaming: false,
+        };
+        db.saveMessage(msg).catch((e) =>
+          console.warn('[bg] 保存后台消息失败:', e)
+        );
+      }
+      bgStreams.delete(sk);
+    }
+    return;
+  }
+
+  // 确保缓冲区存在
+  let bg = bgStreams.get(sk);
+  if (!bg) {
+    bg = {
+      msgId: `ai-${uuid()}`,
+      sessionKey: sk,
+      text: '',
+      thinking: '',
+      toolCards: new Map(),
+      createdAt: Date.now(),
+    };
+    bgStreams.set(sk, bg);
+  }
+
+  if (stream === 'assistant') {
+    const text = data?.text;
+    if (text && typeof text === 'string') {
+      const thinking = extractThinkingContent(text);
+      const cleaned = stripThinkingTags(text);
+      if (cleaned) {
+        if (cleaned.length > bg.text.length) {
+          bg.text = cleaned;
+        } else if (cleaned.length > 0 && !bg.text.endsWith(cleaned)) {
+          bg.text = bg.text + '\n\n' + cleaned;
+        }
+      }
+      if (thinking) {
+        if (thinking.length > bg.thinking.length) {
+          bg.thinking = thinking;
+        } else if (!bg.thinking.endsWith(thinking)) {
+          bg.thinking = bg.thinking ? bg.thinking + '\n\n---\n\n' + thinking : thinking;
+        }
+      }
+    }
+    return;
+  }
+
+  if (stream === 'tool') {
+    const toolCallId = data?.toolCallId || data?.id || data?.tool_call_id;
+    if (!toolCallId) return;
+    const name = (data?.name as string) || (data?.tool_name as string) || 'tool';
+    const phase = (data?.phase as string) || (data?.status as string) || '';
+    const inputRaw = data?.input ?? data?.arguments ?? data?.params ?? data?.tool_input ?? data?.command;
+    const outputRaw = data?.output ?? data?.result ?? data?.content ?? data?.tool_result ?? data?.text ?? data?.response;
+    const inputStr = inputRaw ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2)) : undefined;
+    const outputStr = outputRaw ? (typeof outputRaw === 'string' ? outputRaw : JSON.stringify(outputRaw, null, 2)) : undefined;
+    const errorStr = data?.error ? (typeof data.error === 'string' ? data.error : JSON.stringify(data.error)) : undefined;
+
+    if (!bg.toolCards.has(toolCallId as string)) {
+      bg.toolCards.set(toolCallId as string, {
+        id: toolCallId as string,
+        name,
+        status: phase === 'start' ? 'running' : (phase === 'error' ? 'error' : 'done'),
+        input: inputStr,
+        output: outputStr,
+        startedAt: Date.now(),
+      });
+    } else {
+      const existing = bg.toolCards.get(toolCallId as string)!;
+      const isFinished = phase === 'result' || phase === 'end' || phase === 'error' || phase === 'done';
+      bg.toolCards.set(toolCallId as string, {
+        ...existing,
+        name: name !== 'tool' ? name : existing.name,
+        status: phase === 'error' ? 'error' : (isFinished ? 'done' : existing.status),
+        input: inputStr || existing.input,
+        output: outputStr || errorStr || existing.output,
+        finishedAt: isFinished ? Date.now() : existing.finishedAt,
+      });
+    }
+  }
+}
+
+/** 处理非当前会话的 chat.event — 后台保存 */
+function _bgHandleChatEvent(payload: ChatEventPayload) {
+  const sk = payload.sessionKey!;
+  const { state: chatState } = payload;
+
+  if (chatState === 'final') {
+    const rawText = extractText(payload.message);
+    const text = rawText ? stripThinkingTags(rawText) : '';
+    const thinking = rawText ? extractThinkingContent(rawText) : '';
+
+    // 合并后台缓冲区的工具调用数据
+    const bg = bgStreams.get(sk);
+    const toolCalls = bg && bg.toolCards.size > 0
+      ? Array.from(bg.toolCards.values())
+      : undefined;
+    const finalThinking = thinking || bg?.thinking || undefined;
+
+    if (text || toolCalls) {
+      const msg: Message = {
+        id: bg?.msgId || `ai-${uuid()}`,
+        sessionKey: sk,
+        role: 'assistant',
+        content: text || bg?.text || '',
+        thinking: finalThinking,
+        toolCalls,
+        createdAt: Date.now(),
+        isStreaming: false,
+      };
+      db.saveMessage(msg).catch((e) =>
+        console.warn('[bg] 保存后台 final 消息失败:', e)
+      );
+    }
+    bgStreams.delete(sk);
+  }
+}
+
 export const useChatStore = create<ChatState>((set, get) => {
   // ==================== 事件处理 ====================
 
@@ -375,8 +560,9 @@ export const useChatStore = create<ChatState>((set, get) => {
     }
 
     const state = get();
-    // 过滤非当前会话
+    // 非当前会话 → 路由到后台处理（不丢弃）
     if (payload.sessionKey && payload.sessionKey !== state.currentSessionKey && state.currentSessionKey) {
+      _bgHandleChatEvent(payload);
       return;
     }
 
@@ -395,8 +581,25 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentRunId: payload.runId || state.currentRunId,
         lastAbortedUserMsgId: null,
       };
-      if (text && text.length > state.currentAiText.length) updates.currentAiText = text;
-      if (thinking && thinking.length > state.currentAiThinking.length) updates.currentAiThinking = thinking;
+      // 文本累积（兼容 agent 多 turn 重置）
+      if (text) {
+        if (text.length > state.currentAiText.length) {
+          updates.currentAiText = text;
+        } else if (text.length > 0 && text.length < state.currentAiText.length
+          && !state.currentAiText.endsWith(text)) {
+          updates.currentAiText = state.currentAiText + '\n\n' + text;
+        }
+      }
+      // 思维链累积
+      if (thinking) {
+        if (thinking.length > state.currentAiThinking.length) {
+          updates.currentAiThinking = thinking;
+        } else if (!state.currentAiThinking.endsWith(thinking)) {
+          updates.currentAiThinking = state.currentAiThinking
+            ? state.currentAiThinking + '\n\n---\n\n' + thinking
+            : thinking;
+        }
+      }
       set(updates as Partial<ChatState>);
       return;
     }
@@ -548,7 +751,11 @@ export const useChatStore = create<ChatState>((set, get) => {
   /** 处理 agent 事件 */
   function handleAgentEvent(payload: AgentEventPayload) {
     const state = get();
-    if (payload.sessionKey && payload.sessionKey !== state.currentSessionKey) return;
+    // 非当前会话 → 路由到后台缓冲区（不丢弃）
+    if (payload.sessionKey && payload.sessionKey !== state.currentSessionKey) {
+      _bgHandleAgentEvent(payload);
+      return;
+    }
 
     const { stream, data } = payload;
 
@@ -567,6 +774,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     }
 
     // assistant 流 — 高频文本累积 + 思维链提取
+    // 注意：agent 模式下工具调用之间，text 可能从头开始（新 turn）
     if (stream === 'assistant') {
       const text = data?.text;
       if (text && typeof text === 'string') {
@@ -579,11 +787,27 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentRunId: payload.runId || state.currentRunId,
         };
 
-        if (cleaned && cleaned.length > state.currentAiText.length) {
-          updates.currentAiText = cleaned;
+        if (cleaned) {
+          if (cleaned.length > state.currentAiText.length) {
+            // 同 turn 内文本持续增长
+            updates.currentAiText = cleaned;
+          } else if (cleaned.length > 0 && cleaned.length < state.currentAiText.length
+            && !state.currentAiText.endsWith(cleaned)) {
+            // 新 turn：text 变短了（从头开始） → 拼接到已有文本后面
+            updates.currentAiText = state.currentAiText + '\n\n' + cleaned;
+          }
         }
-        if (thinking && thinking.length > state.currentAiThinking.length) {
-          updates.currentAiThinking = thinking;
+
+        if (thinking) {
+          if (thinking.length > state.currentAiThinking.length) {
+            // 同 turn 思维链增长
+            updates.currentAiThinking = thinking;
+          } else if (!state.currentAiThinking.endsWith(thinking)) {
+            // 新 turn 出现新的思维链 → 追加（用分隔符区分不同轮次）
+            updates.currentAiThinking = state.currentAiThinking
+              ? state.currentAiThinking + '\n\n---\n\n' + thinking
+              : thinking;
+          }
         }
 
         if (updates.currentAiText || updates.currentAiThinking) {
@@ -595,16 +819,30 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     // tool 流
     if (stream === 'tool') {
-      const toolCallId = data?.toolCallId;
+      const toolCallId = data?.toolCallId || data?.id || data?.tool_call_id;
       if (!toolCallId) return;
-      const name = (data?.name as string) || 'tool';
-      const phase = (data?.phase as string) || '';
+      const name = (data?.name as string) || (data?.tool_name as string) || 'tool';
+      const phase = (data?.phase as string) || (data?.status as string) || '';
 
-      // 提取工具 input / output
-      const inputRaw = data?.input ?? data?.arguments ?? data?.params;
-      const outputRaw = data?.output ?? data?.result ?? data?.content;
-      const inputStr = inputRaw ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2)) : undefined;
-      const outputStr = outputRaw ? (typeof outputRaw === 'string' ? outputRaw : JSON.stringify(outputRaw, null, 2)) : undefined;
+      // 提取工具 input — 尝试多种字段路径
+      const inputRaw = data?.input ?? data?.arguments ?? data?.params
+        ?? data?.tool_input ?? data?.command;
+      // 提取工具 output — 尝试多种字段路径
+      const outputRaw = data?.output ?? data?.result ?? data?.content
+        ?? data?.tool_result ?? data?.text ?? data?.response;
+      // 序列化
+      const inputStr = inputRaw
+        ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2))
+        : undefined;
+      const outputStr = outputRaw
+        ? (typeof outputRaw === 'string' ? outputRaw : JSON.stringify(outputRaw, null, 2))
+        : undefined;
+      // 错误信息
+      const errorStr = data?.error
+        ? (typeof data.error === 'string' ? data.error : JSON.stringify(data.error))
+        : undefined;
+
+      console.debug(`[store] tool event: id=${toolCallId} name=${name} phase=${phase} hasInput=${!!inputStr} hasOutput=${!!outputStr} dataKeys=${Object.keys(data || {})}`);
 
       set((s) => {
         const toolCards = new Map(s.toolCards);
@@ -612,18 +850,21 @@ export const useChatStore = create<ChatState>((set, get) => {
           toolCards.set(toolCallId as string, {
             id: toolCallId as string,
             name,
-            status: phase === 'start' ? 'running' : 'done',
+            status: phase === 'start' ? 'running' : (phase === 'error' ? 'error' : 'done'),
             input: inputStr,
+            output: outputStr,
             startedAt: Date.now(),
           });
         } else {
           const existing = toolCards.get(toolCallId as string)!;
+          const isFinished = phase === 'result' || phase === 'end' || phase === 'error' || phase === 'done';
           toolCards.set(toolCallId as string, {
             ...existing,
-            status: phase === 'error' ? 'error' : (phase === 'result' ? 'done' : existing.status),
+            name: name !== 'tool' ? name : existing.name, // 保留更具体的名字
+            status: phase === 'error' ? 'error' : (isFinished ? 'done' : existing.status),
             input: inputStr || existing.input,
-            output: outputStr || existing.output,
-            finishedAt: (phase === 'result' || phase === 'error') ? Date.now() : existing.finishedAt,
+            output: outputStr || errorStr || existing.output,
+            finishedAt: isFinished ? Date.now() : existing.finishedAt,
           });
         }
         return { toolCards };
@@ -822,15 +1063,26 @@ export const useChatStore = create<ChatState>((set, get) => {
           .chatAbort(state.currentSessionKey, state.currentRunId || undefined)
           .catch(() => {});
       }
+      // 保存当前流式输出的内容（包括工具调用）
+      _saveStreamingStateToDb(state);
+
       // 立即更新本地状态，标记最后一条用户消息
       const lastUserMsg = [...state.messages].reverse().find(m => m.role === 'user');
       set({
         isStreaming: false,
+        currentAiText: '',
+        currentAiThinking: '',
+        currentAiMessageId: null,
+        currentRunId: null,
+        toolCards: new Map(),
         lastAbortedUserMsgId: lastUserMsg?.id || null,
       });
     },
 
     switchSession: (key: string) => {
+      // ——— 切换前：保存正在流式输出的 AI 消息（包括工具调用）到 DB ———
+      _saveStreamingStateToDb(get());
+
       set({
         currentSessionKey: key,
         messages: [],
@@ -843,6 +1095,21 @@ export const useChatStore = create<ChatState>((set, get) => {
         lastAbortedUserMsgId: null,
       });
       localStorage.setItem('clawchat-session-key', key);
+
+      // 检查目标会话是否有后台流式缓冲区（切走时还在输出的那段）
+      const bg = bgStreams.get(key);
+      if (bg) {
+        // 将后台缓冲区的状态"提升"到前台
+        set({
+          currentAiMessageId: bg.msgId,
+          currentAiText: bg.text,
+          currentAiThinking: bg.thinking,
+          toolCards: new Map(bg.toolCards),
+          isStreaming: true,
+        });
+        bgStreams.delete(key);
+      }
+
       get().loadHistory();
     },
 
@@ -851,6 +1118,9 @@ export const useChatStore = create<ChatState>((set, get) => {
      * 不在列表中创建条目；等用户发送第一条消息时才创建。
      */
     createNewSession: () => {
+      // 切换前保存当前流式状态
+      _saveStreamingStateToDb(get());
+
       const baseKey = apiClient.sessionKey;
       if (!baseKey) return;
       // 从 agent:main:clawchat-xxx 提取 agent:main 前缀
@@ -906,6 +1176,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         const localUserMsgsWithAtt: { content: string; attachments: FileAttachment[] }[] = [];
         const localToolCallsById = new Map<string, ToolCall[]>();
         const localToolCallsByText = new Map<string, ToolCall[]>();
+        const localThinkingById = new Map<string, string>();
+        const localThinkingByText = new Map<string, string>();
 
         for (const lm of localMessages) {
           if (lm.attachments && lm.attachments.length > 0) {
@@ -921,6 +1193,12 @@ export const useChatStore = create<ChatState>((set, get) => {
             localToolCallsById.set(lm.id, lm.toolCalls);
             const tcKey = lm.content.substring(0, 50).trim();
             if (tcKey) localToolCallsByText.set(tcKey, lm.toolCalls);
+          }
+          // 收集思维链数据（用于历史恢复）
+          if (lm.thinking && lm.role === 'assistant') {
+            localThinkingById.set(lm.id, lm.thinking);
+            const tkKey = lm.content.substring(0, 50).trim();
+            if (tkKey) localThinkingByText.set(tkKey, lm.thinking);
           }
         }
 
@@ -1027,13 +1305,17 @@ export const useChatStore = create<ChatState>((set, get) => {
 
           if (!text && attachments.length === 0) continue;
 
-          // ====== 恢复工具调用数据（从本地 DB）======
+          // ====== 恢复工具调用 + 思维链数据（从本地 DB）======
           let toolCalls: ToolCall[] | undefined;
+          let thinking: string | undefined;
           if (role === 'assistant') {
             const msgId = msg.id as string;
             const tcKey = text.substring(0, 50).trim();
             toolCalls = (msgId ? localToolCallsById.get(msgId) : undefined)
               || (tcKey ? localToolCallsByText.get(tcKey) : undefined)
+              || undefined;
+            thinking = (msgId ? localThinkingById.get(msgId) : undefined)
+              || (tcKey ? localThinkingByText.get(tcKey) : undefined)
               || undefined;
           }
 
@@ -1042,6 +1324,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             sessionKey,
             role: role === 'assistant' ? 'assistant' : 'user',
             content: text,
+            thinking,
             attachments: attachments.length > 0 ? attachments : undefined,
             toolCalls,
             createdAt: msg.timestamp || Date.now(),

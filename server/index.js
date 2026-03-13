@@ -484,6 +484,10 @@ function handleGatewayMessage(rawData) {
     const stream = msg.payload?.stream;
     const phase = msg.payload?.data?.phase;
     log.debug(`Gateway 事件: event=${eventName}${stream ? ` stream=${stream}` : ''}${phase ? ` phase=${phase}` : ''}`);
+    // 工具事件详细日志 — 帮助诊断 input/output 字段
+    if (stream === 'tool') {
+      log.info(`🔧 Tool event: phase=${phase}, data keys=${JSON.stringify(Object.keys(msg.payload?.data || {}))}, data=${JSON.stringify(msg.payload?.data).substring(0, 500)}`);
+    }
 
     const eventSessionKey = msg.payload?.sessionKey;
     if (eventSessionKey) {

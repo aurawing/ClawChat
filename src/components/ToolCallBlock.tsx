@@ -174,8 +174,21 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
             </div>
           )}
           {!toolCall.input && !toolCall.output && (
-            <div className="text-neutral-500">
-              ID: <span className="font-mono text-neutral-400">{toolCall.id}</span>
+            <div className="text-neutral-500 space-y-1">
+              <div>
+                <span className="text-neutral-600">工具: </span>
+                <span className="font-mono text-neutral-400">{toolCall.name}</span>
+              </div>
+              <div>
+                <span className="text-neutral-600">ID: </span>
+                <span className="font-mono text-neutral-500 text-[10px]">{toolCall.id}</span>
+              </div>
+              {toolCall.status === 'running' && (
+                <div className="text-amber-400/70 text-[10px]">等待执行结果…</div>
+              )}
+              {toolCall.status === 'done' && (
+                <div className="text-neutral-600 text-[10px]">（工具未返回详细的输入/输出数据）</div>
+              )}
             </div>
           )}
         </div>
