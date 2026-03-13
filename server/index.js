@@ -480,6 +480,11 @@ function handleGatewayMessage(rawData) {
 
   // ── 5. 事件 → 按 sessionKey 路由到对应用户 ────────────────
   if (msg.type === 'event') {
+    const eventName = msg.event || '(unknown)';
+    const stream = msg.payload?.stream;
+    const phase = msg.payload?.data?.phase;
+    log.debug(`Gateway 事件: event=${eventName}${stream ? ` stream=${stream}` : ''}${phase ? ` phase=${phase}` : ''}`);
+
     const eventSessionKey = msg.payload?.sessionKey;
     if (eventSessionKey) {
       for (const [, session] of sessions) {

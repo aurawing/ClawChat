@@ -609,6 +609,17 @@ export const useChatStore = create<ChatState>((set, get) => {
       handleChatEvent(payload as unknown as ChatEventPayload);
     } else if (event === 'agent') {
       handleAgentEvent(payload as unknown as AgentEventPayload);
+    } else if (event === 'stream' || event === 'tool' || event === 'run') {
+      // 兼容部分 Gateway 版本：stream/tool/run 事件可能也包含 agent 数据
+      const p = payload as Record<string, unknown>;
+      const data = p?.data as Record<string, unknown> | undefined;
+      if (p?.stream || data?.toolCallId) {
+        handleAgentEvent(p as unknown as AgentEventPayload);
+      }
+    }
+    // 调试：未知事件
+    else {
+      console.debug('[store] 未识别事件:', event, payload);
     }
   }
 
@@ -650,15 +661,30 @@ export const useChatStore = create<ChatState>((set, get) => {
         // 保存用户身份
         const resolvedUserId = apiClient.userId || config.username || null;
 
-        // 恢复上次打开的会话（如果存在）
+        // 恢复上次打开的会话（如果存在且属于当前用户）
         const savedSessionKey = localStorage.getItem('clawchat-session-key');
-        const finalSessionKey = savedSessionKey || sessionKey;
+        let finalSessionKey: string = sessionKey || '';
+        if (savedSessionKey) {
+          // 验证 key 包含当前用户标识（clawchat-{userId}）
+          const userTag = resolvedUserId ? `clawchat-${resolvedUserId}` : 'clawchat-';
+          if (savedSessionKey.includes(userTag)) {
+            finalSessionKey = savedSessionKey;
+            console.log('[store] 恢复上次会话:', savedSessionKey);
+          } else {
+            console.log('[store] 保存的会话不属于当前用户，使用默认:', sessionKey);
+          }
+        }
 
         set({
-          currentSessionKey: finalSessionKey,
+          currentSessionKey: finalSessionKey || null,
           userId: resolvedUserId,
           username: config.username || apiClient.userId || null,
         });
+
+        // 保存当前 sessionKey（确保下次打开时能恢复）
+        if (finalSessionKey) {
+          localStorage.setItem('clawchat-session-key', finalSessionKey);
+        }
 
         // 保存配置
         localStorage.setItem('clawchat-config', JSON.stringify(config));
@@ -890,34 +916,53 @@ export const useChatStore = create<ChatState>((set, get) => {
             const msgId = msg.id as string;
             const fuzzyKey = text.substring(0, 50).trim();
             let found: FileAttachment[] | undefined;
+            let foundSource = '';
 
-            // 策略1：服务端文件存储（跨安装持久化 ✓）
+            // 策略1：按文本匹配服务端附件（最精确）
             if (fuzzyKey) {
               found = serverAttByText.get(fuzzyKey);
-            }
-            if (!found && serverAttIdx < serverAttOrdered.length) {
-              found = serverAttOrdered[serverAttIdx];
-              serverAttIdx++;
+              if (found) foundSource = '服务端(文本匹配)';
             }
 
-            // 策略2：本地 IndexedDB（仅当前安装有效）
-            if (!found) {
-              found = msgId ? localAttById.get(msgId) : undefined;
-              if (!found && fuzzyKey) found = localAttByText.get(fuzzyKey);
-              if (!found && localUserMsgIdx < localUserMsgsWithAtt.length) {
-                const candidate = localUserMsgsWithAtt[localUserMsgIdx];
-                const candidateClean = stripTimestampPrefix(stripOperatorInjectedContent(candidate.content)).substring(0, 30);
-                const currentClean = text.substring(0, 30);
-                if (!currentClean || !candidateClean || currentClean === candidateClean) {
-                  found = candidate.attachments;
-                  localUserMsgIdx++;
-                }
+            // 策略2：按消息 ID 匹配本地 IndexedDB
+            if (!found && msgId) {
+              found = localAttById.get(msgId);
+              if (found) foundSource = '本地DB(ID匹配)';
+            }
+
+            // 策略3：按文本匹配本地 IndexedDB
+            if (!found && fuzzyKey) {
+              found = localAttByText.get(fuzzyKey);
+              if (found) foundSource = '本地DB(文本匹配)';
+            }
+
+            // 策略4：本地 IndexedDB 按内容模糊匹配
+            if (!found && localUserMsgIdx < localUserMsgsWithAtt.length) {
+              const candidate = localUserMsgsWithAtt[localUserMsgIdx];
+              const candidateClean = stripTimestampPrefix(stripOperatorInjectedContent(candidate.content)).substring(0, 30);
+              const currentClean = text.substring(0, 30);
+              if (!currentClean || !candidateClean || currentClean === candidateClean) {
+                found = candidate.attachments;
+                localUserMsgIdx++;
+                foundSource = '本地DB(顺序匹配)';
+              }
+            }
+
+            // 策略5：服务端顺序匹配 — 仅当前面的策略都失败且文本为空时才尝试
+            // （避免为无附件的消息误消费服务端附件组）
+            if (!found && serverAttIdx < serverAttOrdered.length) {
+              // 只有当这条消息确实可能有附件时才使用顺序匹配
+              // 判断依据：消息文本为空或很短（通常发图时文字很少）
+              if (!text || text.length < 10) {
+                found = serverAttOrdered[serverAttIdx];
+                serverAttIdx++;
+                foundSource = '服务端(顺序匹配)';
               }
             }
 
             if (found) {
               attachments = found;
-              console.debug('[store] 恢复附件:', fuzzyKey || msgId, `${attachments.length} 个, 来源: ${serverAttByText.has(fuzzyKey || '') ? '服务端' : '本地DB'}`);
+              console.debug('[store] 恢复附件:', fuzzyKey || msgId, `${attachments.length} 个, 来源: ${foundSource}`);
             }
           }
 
