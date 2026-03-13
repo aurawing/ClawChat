@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { Message } from '../types';
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingBlock from './ThinkingBlock';
-import ToolCallBlock from './ToolCallBlock';
+import { ToolCallGroup } from './ToolCallBlock';
 import ImageViewer from './ImageViewer';
 
 interface MessageBubbleProps {
@@ -148,13 +148,9 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
               />
             )}
 
-            {/* 工具调用 */}
+            {/* 工具调用 — 层次化展示 */}
             {message.toolCalls && message.toolCalls.length > 0 && (
-              <div className="space-y-1">
-                {message.toolCalls.map((tc) => (
-                  <ToolCallBlock key={tc.id} toolCall={tc} />
-                ))}
-              </div>
+              <ToolCallGroup toolCalls={message.toolCalls} />
             )}
 
             {/* 主要内容（Markdown 中的图片也可点击放大） */}

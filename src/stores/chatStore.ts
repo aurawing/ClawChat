@@ -567,6 +567,12 @@ export const useChatStore = create<ChatState>((set, get) => {
       const name = (data?.name as string) || 'tool';
       const phase = (data?.phase as string) || '';
 
+      // 提取工具 input / output
+      const inputRaw = data?.input ?? data?.arguments ?? data?.params;
+      const outputRaw = data?.output ?? data?.result ?? data?.content;
+      const inputStr = inputRaw ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2)) : undefined;
+      const outputStr = outputRaw ? (typeof outputRaw === 'string' ? outputRaw : JSON.stringify(outputRaw, null, 2)) : undefined;
+
       set((s) => {
         const toolCards = new Map(s.toolCards);
         if (!toolCards.has(toolCallId as string)) {
@@ -574,15 +580,18 @@ export const useChatStore = create<ChatState>((set, get) => {
             id: toolCallId as string,
             name,
             status: phase === 'start' ? 'running' : 'done',
+            input: inputStr,
+            startedAt: Date.now(),
           });
         } else {
           const existing = toolCards.get(toolCallId as string)!;
-          if (phase === 'result' || phase === 'error') {
-            toolCards.set(toolCallId as string, {
-              ...existing,
-              status: phase === 'error' ? 'error' : 'done',
-            });
-          }
+          toolCards.set(toolCallId as string, {
+            ...existing,
+            status: phase === 'error' ? 'error' : (phase === 'result' ? 'done' : existing.status),
+            input: inputStr || existing.input,
+            output: outputStr || existing.output,
+            finishedAt: (phase === 'result' || phase === 'error') ? Date.now() : existing.finishedAt,
+          });
         }
         return { toolCards };
       });
@@ -820,7 +829,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         // 构建服务端附件匹配索引（按 messageText 前 50 字符分组）
         const serverAttByText = new Map<string, FileAttachment[]>();
         const serverAttOrdered: FileAttachment[][] = [];
-        let lastServerText = '';
+        let lastServerGroup = '__INIT__'; // 初始哨兵值，不同于空字符串
         for (const sa of serverAttachments) {
           const key = (sa.messageText || '').substring(0, 50).trim();
           const att: FileAttachment = {
@@ -836,9 +845,10 @@ export const useChatStore = create<ChatState>((set, get) => {
             serverAttByText.set(key, existing);
           }
           // 按消息分组收集（按顺序匹配的候选）
-          if (key !== lastServerText) {
+          const groupKey = key || `__empty_${sa.createdAt}__`; // 空文本也用唯一key分组
+          if (groupKey !== lastServerGroup) {
             serverAttOrdered.push([att]);
-            lastServerText = key;
+            lastServerGroup = groupKey;
           } else if (serverAttOrdered.length > 0) {
             serverAttOrdered[serverAttOrdered.length - 1].push(att);
           }

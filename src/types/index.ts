@@ -112,6 +112,10 @@ export interface ToolCall {
   id: string;
   name: string;
   status: 'running' | 'done' | 'error';
+  input?: string;   // 工具调用的输入/参数（JSON 或文本）
+  output?: string;   // 工具调用的输出/结果
+  startedAt?: number;
+  finishedAt?: number;
 }
 
 export interface Message {

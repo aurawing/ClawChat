@@ -912,7 +912,7 @@ app.post('/api/send', async (req, res) => {
 
   // ====== 拦截 chat.send：保存附件到磁盘 ======
   if (method === 'chat.send' && params?.attachments?.length > 0 && params?.sessionKey) {
-    const messageText = (params.content || '').substring(0, 100).trim();
+    const messageText = (params.message || params.content || '').substring(0, 100).trim();
     const saveAtt = sqlite.transaction((atts) => {
       for (const att of atts) {
         if (!att.content) continue; // 没有 base64 数据则跳过
