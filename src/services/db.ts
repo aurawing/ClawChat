@@ -58,6 +58,20 @@ export async function getMessages(sessionKey: string): Promise<Message[]> {
 }
 
 export async function saveMessage(message: Message): Promise<void> {
+  // 清理 blob: URL（重启后失效，不应存入 DB）
+  if (message.attachments) {
+    message = {
+      ...message,
+      attachments: message.attachments.map((att) => {
+        if (att.url && att.url.startsWith('blob:')) {
+          // 有 base64 时移除 blob URL，无 base64 时转换为 data URL 后移除 blob
+          const { url: _blobUrl, ...rest } = att;
+          return rest;
+        }
+        return att;
+      }),
+    };
+  }
   await db.messages.put(message);
   // 同时更新（或创建）会话记录
   const session = await db.sessions.get(message.sessionKey);

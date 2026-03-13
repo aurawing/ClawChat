@@ -54,12 +54,32 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   const [viewerSrc, setViewerSrc] = useState<string | null>(null);
+  const [failedUrls, setFailedUrls] = useState<Set<string>>(new Set());
 
   const timeStr = formatTime(message.createdAt);
 
-  /** 获取图片的显示 URL */
+  /** 获取图片的显示 URL（跳过失效的 blob: URL，优先 http/data） */
   const getImageSrc = (att: { url?: string; base64?: string; type: string }) => {
-    return att.url || (att.base64 ? `data:${att.type};base64,${att.base64}` : '');
+    const url = att.url;
+    // 跳过 blob: URL（重启后失效） 和 已失败的 URL
+    const urlValid = url && !url.startsWith('blob:') && !failedUrls.has(url);
+    if (urlValid) return url;
+    // 回退到 base64 data URL
+    if (att.base64) return `data:${att.type};base64,${att.base64}`;
+    // 如果 URL 存在但是 blob，且没有 base64，仍然尝试（可能失败）
+    return url || '';
+  };
+
+  /** 图片加载失败时的处理 */
+  const handleImgError = (att: { url?: string; base64?: string; type: string }, e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    const currentSrc = img.src;
+    // 标记当前 URL 为失败
+    setFailedUrls(prev => new Set(prev).add(currentSrc));
+    // 如果有 base64 回退
+    if (att.base64 && !currentSrc.startsWith('data:')) {
+      img.src = `data:${att.type};base64,${att.base64}`;
+    }
   };
 
   // 系统消息（错误等）
@@ -91,6 +111,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                         className="max-h-48 max-w-full rounded-xl border border-neutral-700 object-contain cursor-pointer active:opacity-80 transition-opacity"
                         loading="lazy"
                         onClick={() => setViewerSrc(getImageSrc(att))}
+                        onError={(e) => handleImgError(att, e)}
                       />
                     ) : (
                       <div className="flex items-center gap-2 bg-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-300 border border-neutral-700">

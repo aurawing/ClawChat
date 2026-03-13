@@ -649,8 +649,13 @@ export const useChatStore = create<ChatState>((set, get) => {
         }
         // 保存用户身份
         const resolvedUserId = apiClient.userId || config.username || null;
+
+        // 恢复上次打开的会话（如果存在）
+        const savedSessionKey = localStorage.getItem('clawchat-session-key');
+        const finalSessionKey = savedSessionKey || sessionKey;
+
         set({
-          currentSessionKey: sessionKey,
+          currentSessionKey: finalSessionKey,
           userId: resolvedUserId,
           username: config.username || apiClient.userId || null,
         });
@@ -810,10 +815,12 @@ export const useChatStore = create<ChatState>((set, get) => {
           apiClient.getSessionAttachments(sessionKey).catch(() => []),
         ]);
 
-        // 构建本地 DB 附件匹配索引
+        // 构建本地 DB 附件匹配索引 + 工具调用索引
         const localAttById = new Map<string, FileAttachment[]>();
         const localAttByText = new Map<string, FileAttachment[]>();
         const localUserMsgsWithAtt: { content: string; attachments: FileAttachment[] }[] = [];
+        const localToolCallsById = new Map<string, ToolCall[]>();
+        const localToolCallsByText = new Map<string, ToolCall[]>();
 
         for (const lm of localMessages) {
           if (lm.attachments && lm.attachments.length > 0) {
@@ -823,6 +830,12 @@ export const useChatStore = create<ChatState>((set, get) => {
             if (lm.role === 'user') {
               localUserMsgsWithAtt.push({ content: lm.content, attachments: lm.attachments });
             }
+          }
+          // 收集工具调用数据（用于历史恢复）
+          if (lm.toolCalls && lm.toolCalls.length > 0 && lm.role === 'assistant') {
+            localToolCallsById.set(lm.id, lm.toolCalls);
+            const tcKey = lm.content.substring(0, 50).trim();
+            if (tcKey) localToolCallsByText.set(tcKey, lm.toolCalls);
           }
         }
 
@@ -910,12 +923,23 @@ export const useChatStore = create<ChatState>((set, get) => {
 
           if (!text && attachments.length === 0) continue;
 
+          // ====== 恢复工具调用数据（从本地 DB）======
+          let toolCalls: ToolCall[] | undefined;
+          if (role === 'assistant') {
+            const msgId = msg.id as string;
+            const tcKey = text.substring(0, 50).trim();
+            toolCalls = (msgId ? localToolCallsById.get(msgId) : undefined)
+              || (tcKey ? localToolCallsByText.get(tcKey) : undefined)
+              || undefined;
+          }
+
           messages.push({
             id: (msg.id as string) || uuid(),
             sessionKey,
             role: role === 'assistant' ? 'assistant' : 'user',
             content: text,
             attachments: attachments.length > 0 ? attachments : undefined,
+            toolCalls,
             createdAt: msg.timestamp || Date.now(),
           });
         }

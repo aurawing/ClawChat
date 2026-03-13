@@ -51,27 +51,38 @@ export default function ChatPage() {
     [sendMessage]
   );
 
-  // 构造显示用的消息列表（包含流式中的 AI 消息）
+  // 构造显示用的消息列表（包含流式中的 AI 消息和工具调用）
   const displayMessages = [...messages];
-  // AI 正在流式输出文本
-  if (currentAiText && currentAiMessageId) {
-    const existing = displayMessages.find((m) => m.id === currentAiMessageId);
+  const hasToolCards = toolCards.size > 0;
+  // 有文本或有工具调用时，显示流式 AI 消息
+  if (currentAiText || hasToolCards) {
+    const msgId = currentAiMessageId || 'ai-streaming';
+    const existing = displayMessages.find((m) => m.id === msgId);
     if (!existing) {
       const streamingMsg: Message = {
-        id: currentAiMessageId,
+        id: msgId,
         sessionKey: currentSessionKey || '',
         role: 'assistant',
-        content: currentAiText,
+        content: currentAiText || '',
         toolCalls: Array.from(toolCards.values()),
         createdAt: Date.now(),
         isStreaming: true,
       };
       displayMessages.push(streamingMsg);
+    } else {
+      // 更新已有的流式消息的工具调用
+      const idx = displayMessages.indexOf(existing);
+      displayMessages[idx] = {
+        ...existing,
+        toolCalls: Array.from(toolCards.values()),
+        content: currentAiText || existing.content,
+        isStreaming: true,
+      };
     }
   }
 
-  // 是否显示"思考中"占位符：正在等待 AI 回复但还没收到任何文本
-  const showThinkingPlaceholder = isStreaming && !currentAiText && !currentAiMessageId;
+  // 是否显示"思考中"占位符：正在等待但还没有文本也没有工具调用
+  const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiMessageId;
 
   // 当前会话标题：优先使用 sessions 列表中的 AI 生成标题，回退到 sessionKey 解析
   const currentSession = sessions.find((s) => s.key === currentSessionKey);
