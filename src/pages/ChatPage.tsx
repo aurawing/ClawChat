@@ -73,10 +73,9 @@ export default function ChatPage() {
   // 是否显示"思考中"占位符：正在等待 AI 回复但还没收到任何文本
   const showThinkingPlaceholder = isStreaming && !currentAiText && !currentAiMessageId;
 
-  // 从 sessionKey 中提取当前会话标题
-  const currentTitle = currentSessionKey
-    ? extractTitle(currentSessionKey)
-    : 'ClawChat';
+  // 当前会话标题：优先使用 sessions 列表中的 AI 生成标题，回退到 sessionKey 解析
+  const currentSession = sessions.find((s) => s.key === currentSessionKey);
+  const currentTitle = currentSession?.title || (currentSessionKey ? extractTitle(currentSessionKey) : 'ClawChat');
 
   return (
     <div className="h-screen flex bg-neutral-950">

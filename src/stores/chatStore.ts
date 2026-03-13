@@ -338,6 +338,7 @@ interface ChatState {
   resetSession: (key: string) => Promise<void>;
   resendLastMessage: () => void;
   deleteLastUserMessage: () => void;
+  loadFirstUserMessage: (sessionKey: string) => Promise<string | null>;
 }
 
 export const useChatStore = create<ChatState>((set, get) => {
@@ -442,8 +443,9 @@ export const useChatStore = create<ChatState>((set, get) => {
                       : sess
                   ),
                 }));
-                // 保存到本地 DB
+                // 保存到本地 DB + 服务端（跨安装持久化）
                 db.updateSessionTitle(sessionKeyForTitle, cleanTitle).catch(() => {});
+                apiClient.saveSessionTitle(sessionKeyForTitle, cleanTitle).catch(() => {});
               })
               .catch((e) => console.warn('[store] AI 标题生成失败:', e));
           }
@@ -793,50 +795,109 @@ export const useChatStore = create<ChatState>((set, get) => {
           return;
         }
 
-        // 先加载本地 DB 中带附件的消息，用于合并
-        const localMessages = await db.getMessages(sessionKey);
-        const localAttachmentMap = new Map<string, FileAttachment[]>();
+        // ====== 并行加载：本地 DB 消息 + 服务端附件 ======
+        const [localMessages, serverAttachments] = await Promise.all([
+          db.getMessages(sessionKey),
+          apiClient.getSessionAttachments(sessionKey).catch(() => []),
+        ]);
+
+        // 构建本地 DB 附件匹配索引
+        const localAttById = new Map<string, FileAttachment[]>();
+        const localAttByText = new Map<string, FileAttachment[]>();
+        const localUserMsgsWithAtt: { content: string; attachments: FileAttachment[] }[] = [];
+
         for (const lm of localMessages) {
           if (lm.attachments && lm.attachments.length > 0) {
-            // 用消息内容的前50字符作为模糊匹配 key
+            localAttById.set(lm.id, lm.attachments);
             const fuzzyKey = lm.content.substring(0, 50).trim();
-            localAttachmentMap.set(lm.id, lm.attachments);
-            if (fuzzyKey) localAttachmentMap.set(`text:${fuzzyKey}`, lm.attachments);
+            if (fuzzyKey) localAttByText.set(fuzzyKey, lm.attachments);
+            if (lm.role === 'user') {
+              localUserMsgsWithAtt.push({ content: lm.content, attachments: lm.attachments });
+            }
           }
         }
 
+        // 构建服务端附件匹配索引（按 messageText 前 50 字符分组）
+        const serverAttByText = new Map<string, FileAttachment[]>();
+        const serverAttOrdered: FileAttachment[][] = [];
+        let lastServerText = '';
+        for (const sa of serverAttachments) {
+          const key = (sa.messageText || '').substring(0, 50).trim();
+          const att: FileAttachment = {
+            id: sa.id,
+            name: sa.name,
+            type: sa.type,
+            size: sa.size,
+            url: sa.url,
+          };
+          if (key) {
+            const existing = serverAttByText.get(key) || [];
+            existing.push(att);
+            serverAttByText.set(key, existing);
+          }
+          // 按消息分组收集（按顺序匹配的候选）
+          if (key !== lastServerText) {
+            serverAttOrdered.push([att]);
+            lastServerText = key;
+          } else if (serverAttOrdered.length > 0) {
+            serverAttOrdered[serverAttOrdered.length - 1].push(att);
+          }
+        }
+
+        // 按顺序处理 Gateway 消息
         const messages: Message[] = [];
+        let localUserMsgIdx = 0;
+        let serverAttIdx = 0;
+
         for (const msg of result.messages) {
           const role = msg.role as string;
-
-          // ====== 跳过非 user/assistant 的角色 ======
           if (shouldSkipRole(role)) continue;
           if (role !== 'user' && role !== 'assistant') continue;
 
           let text = extractText(msg);
-
-          // ====== 对 user 消息，去除 operator 注入的内容和时间戳 ======
           if (role === 'user') {
             text = stripOperatorInjectedContent(text);
             text = stripTimestampPrefix(text);
           }
 
-          // ====== 提取附件（图片等）======
           let attachments = extractAttachments(msg);
 
-          // 如果 Gateway 未返回附件，尝试从本地 DB 合并
+          // ====== 附件恢复：多策略（Gateway → 服务端文件 → 本地DB） ======
           if (attachments.length === 0 && role === 'user') {
             const msgId = msg.id as string;
             const fuzzyKey = text.substring(0, 50).trim();
-            const localAtts = (msgId && localAttachmentMap.get(msgId))
-              || (fuzzyKey && localAttachmentMap.get(`text:${fuzzyKey}`))
-              || undefined;
-            if (localAtts) {
-              attachments = localAtts;
+            let found: FileAttachment[] | undefined;
+
+            // 策略1：服务端文件存储（跨安装持久化 ✓）
+            if (fuzzyKey) {
+              found = serverAttByText.get(fuzzyKey);
+            }
+            if (!found && serverAttIdx < serverAttOrdered.length) {
+              found = serverAttOrdered[serverAttIdx];
+              serverAttIdx++;
+            }
+
+            // 策略2：本地 IndexedDB（仅当前安装有效）
+            if (!found) {
+              found = msgId ? localAttById.get(msgId) : undefined;
+              if (!found && fuzzyKey) found = localAttByText.get(fuzzyKey);
+              if (!found && localUserMsgIdx < localUserMsgsWithAtt.length) {
+                const candidate = localUserMsgsWithAtt[localUserMsgIdx];
+                const candidateClean = stripTimestampPrefix(stripOperatorInjectedContent(candidate.content)).substring(0, 30);
+                const currentClean = text.substring(0, 30);
+                if (!currentClean || !candidateClean || currentClean === candidateClean) {
+                  found = candidate.attachments;
+                  localUserMsgIdx++;
+                }
+              }
+            }
+
+            if (found) {
+              attachments = found;
+              console.debug('[store] 恢复附件:', fuzzyKey || msgId, `${attachments.length} 个, 来源: ${serverAttByText.has(fuzzyKey || '') ? '服务端' : '本地DB'}`);
             }
           }
 
-          // 允许仅有附件无文字的消息
           if (!text && attachments.length === 0) continue;
 
           messages.push({
@@ -866,22 +927,26 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (!apiClient.gatewayReady) return;
 
       try {
-        const result = (await apiClient.sessionsList()) as {
-          sessions?: Array<{
-            key: string;
-            title?: string;
-            lastMessage?: string;
-            updatedAt?: number;
-          }>;
-        };
+        // 并行获取 Gateway 会话列表 + 服务端持久化标题
+        const [result, serverTitles] = await Promise.all([
+          apiClient.sessionsList() as Promise<{
+            sessions?: Array<{
+              key: string;
+              title?: string;
+              lastMessage?: string;
+              updatedAt?: number;
+            }>;
+          }>,
+          apiClient.getSessionTitles().catch(() => ({} as Record<string, string>)),
+        ]);
+
         if (!result?.sessions) return;
 
-        // ====== 客户端侧过滤：只显示 ClawChat 创建的会话（带 clawchat- 前缀），并按用户隔离 ======
+        // ====== 客户端侧过滤：只显示 ClawChat 创建的会话 ======
         const state = get();
         const currentUserId = state.userId || state.username || 'default';
         const filteredSessions = result.sessions.filter(s => {
           if (!s.key?.includes(':clawchat-')) return false;
-          // 按当前用户隔离
           if (currentUserId) return s.key.includes(`:clawchat-${currentUserId}`);
           return true;
         });
@@ -896,9 +961,15 @@ export const useChatStore = create<ChatState>((set, get) => {
         }
 
         const sessions: Session[] = filteredSessions.map((s) => {
-          // 优先使用本地缓存的 AI 标题
-          const cachedTitle = localTitleMap.get(s.key);
-          let title = cachedTitle || s.title;
+          // 标题优先级：本地DB > 服务端持久化 > Gateway返回 > lastMessage推断 > sessionKey解析
+          let title = localTitleMap.get(s.key)
+            || serverTitles[s.key]
+            || s.title;
+
+          // 如果有服务端标题但本地没有，同步到本地 DB
+          if (!localTitleMap.get(s.key) && serverTitles[s.key]) {
+            db.updateSessionTitle(s.key, serverTitles[s.key]).catch(() => {});
+          }
 
           if (!title || title === s.key || /^agent:/.test(title)) {
             if (s.lastMessage) {
@@ -915,9 +986,63 @@ export const useChatStore = create<ChatState>((set, get) => {
           };
         });
 
+        // 对于仍然是"新对话"的会话，异步尝试从聊天记录生成标题
+        for (const sess of sessions) {
+          if (sess.title === '新对话' || sess.title === '主对话') {
+            // 用 lastMessage 生成，或异步加载首条用户消息
+            get().loadFirstUserMessage(sess.key).then((firstMsg: string | null) => {
+              if (firstMsg) {
+                const betterTitle = generateSessionTitle(firstMsg);
+                if (betterTitle && betterTitle !== '新对话') {
+                  // 更新 sessions 状态
+                  set((s) => ({
+                    sessions: s.sessions.map((item) =>
+                      item.key === sess.key ? { ...item, title: betterTitle } : item
+                    ),
+                  }));
+                  // 持久化（本地 + 服务端）
+                  db.updateSessionTitle(sess.key, betterTitle).catch(() => {});
+                  apiClient.saveSessionTitle(sess.key, betterTitle).catch(() => {});
+                }
+              }
+            }).catch(() => {});
+          }
+        }
+
         set({ sessions });
       } catch (e) {
         console.error('[store] loadSessions error:', e);
+      }
+    },
+
+    /** 加载会话的第一条用户消息内容（用于生成标题） */
+    loadFirstUserMessage: async (sessionKey: string): Promise<string | null> => {
+      try {
+        // 先查本地 DB
+        const localMsgs = await db.getMessages(sessionKey);
+        const localUserMsg = localMsgs.find(m => m.role === 'user');
+        if (localUserMsg) {
+          const text = stripTimestampPrefix(stripOperatorInjectedContent(localUserMsg.content));
+          if (text) return text;
+        }
+
+        // 再查 Gateway（限制 5 条减少开销）
+        const result = (await apiClient.chatHistory(sessionKey, 5)) as {
+          messages?: ChatMessage[];
+        };
+        if (result?.messages) {
+          for (const msg of result.messages) {
+            if (msg.role === 'user') {
+              let text = extractText(msg);
+              text = stripOperatorInjectedContent(text);
+              text = stripTimestampPrefix(text);
+              if (text) return text;
+            }
+          }
+        }
+        return null;
+      } catch {
+        return null;
       }
     },
 

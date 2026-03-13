@@ -483,6 +483,60 @@ export class ApiClient {
     return this.request('sessions.reset', { key });
   }
 
+  /** 保存会话标题到服务端（跨安装持久化） */
+  async saveSessionTitle(sessionKey: string, title: string): Promise<void> {
+    if (!this._sid || !this._baseUrl) return;
+    try {
+      await fetch(`${this._baseUrl}/api/session-title`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sid: this._sid, sessionKey, title }),
+      });
+    } catch (e) {
+      console.warn('[api] saveSessionTitle error:', e);
+    }
+  }
+
+  /** 从服务端获取所有会话标题 */
+  async getSessionTitles(): Promise<Record<string, string>> {
+    if (!this._sid || !this._baseUrl) return {};
+    try {
+      const res = await fetch(`${this._baseUrl}/api/session-titles?sid=${this._sid}`);
+      const data = await res.json();
+      return data?.titles || {};
+    } catch (e) {
+      console.warn('[api] getSessionTitles error:', e);
+      return {};
+    }
+  }
+
+  /** 获取会话的服务端存储附件 */
+  async getSessionAttachments(sessionKey: string): Promise<Array<{
+    id: string;
+    name: string;
+    type: string;
+    size: number;
+    url: string;
+    messageText: string;
+    createdAt: number;
+  }>> {
+    if (!this._sid || !this._baseUrl) return [];
+    try {
+      const res = await fetch(
+        `${this._baseUrl}/api/session-attachments?sid=${this._sid}&sessionKey=${encodeURIComponent(sessionKey)}`
+      );
+      const data = await res.json();
+      // 将相对 URL 转为绝对 URL
+      return (data?.attachments || []).map((att: Record<string, unknown>) => ({
+        ...att,
+        url: `${this._baseUrl}${att.url}`,
+      }));
+    } catch (e) {
+      console.warn('[api] getSessionAttachments error:', e);
+      return [];
+    }
+  }
+
   // ==================== 内部辅助 ====================
 
   private _notifyReadyError(msg: string): void {

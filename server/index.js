@@ -24,7 +24,8 @@ import {
   randomUUID, randomBytes, generateKeyPairSync, createHash,
   sign as ed25519Sign, createPrivateKey,
 } from 'crypto';
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, rmSync } from 'fs';
+import Database from 'better-sqlite3';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -102,6 +103,85 @@ const deviceKey = (() => {
   return dk;
 })();
 const devicePrivateKey = createPrivateKey(deviceKey.privateKeyPem);
+
+// ==================== SQLite 持久化 ====================
+const DB_PATH = join(__dirname, 'clawchat.db');
+const sqlite = new Database(DB_PATH);
+sqlite.pragma('journal_mode = WAL'); // 高并发性能
+
+// 建表
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS session_titles (
+    session_key TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    updated_at  INTEGER DEFAULT (strftime('%s','now') * 1000)
+  )
+`);
+
+// 如果旧的 JSON 文件存在，自动迁移数据
+const OLD_TITLES_PATH = join(__dirname, '.session-titles.json');
+if (existsSync(OLD_TITLES_PATH)) {
+  try {
+    const oldData = JSON.parse(readFileSync(OLD_TITLES_PATH, 'utf8'));
+    const insert = sqlite.prepare('INSERT OR IGNORE INTO session_titles (session_key, title) VALUES (?, ?)');
+    const migrate = sqlite.transaction((entries) => {
+      for (const [key, title] of entries) insert.run(key, title);
+    });
+    migrate(Object.entries(oldData));
+    // 迁移完成后删除旧文件
+    unlinkSync(OLD_TITLES_PATH);
+    log.info(`已将 ${Object.keys(oldData).length} 条标题从 JSON 迁移到 SQLite`);
+  } catch (e) {
+    log.warn('迁移旧标题文件失败:', e.message);
+  }
+}
+
+// ====== 附件存储 ======
+const UPLOADS_DIR = join(__dirname, 'uploads');
+if (!existsSync(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR, { recursive: true });
+
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS attachments (
+    id           TEXT PRIMARY KEY,
+    session_key  TEXT NOT NULL,
+    message_text TEXT,
+    file_name    TEXT NOT NULL,
+    mime_type    TEXT NOT NULL,
+    file_size    INTEGER,
+    file_path    TEXT NOT NULL,
+    created_at   INTEGER DEFAULT (strftime('%s','now') * 1000)
+  )
+`);
+sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_att_session ON attachments(session_key)`);
+
+/** MIME → 文件扩展名 */
+function mimeToExt(mime) {
+  const map = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+    'image/webp': 'webp', 'image/svg+xml': 'svg', 'image/bmp': 'bmp',
+    'application/pdf': 'pdf', 'text/plain': 'txt',
+    'application/zip': 'zip', 'application/json': 'json',
+  };
+  return map[mime] || (mime?.split('/')?.[1]?.replace(/[^a-z0-9]/gi, '') || 'bin');
+}
+
+// 预编译常用 SQL
+const stmts = {
+  // 标题
+  upsertTitle: sqlite.prepare(`
+    INSERT INTO session_titles (session_key, title, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(session_key) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at
+  `),
+  getTitle: sqlite.prepare('SELECT title FROM session_titles WHERE session_key = ?'),
+  getTitlesByUser: sqlite.prepare(`SELECT session_key, title FROM session_titles WHERE session_key LIKE ?`),
+  deleteTitle: sqlite.prepare('DELETE FROM session_titles WHERE session_key = ?'),
+  // 附件
+  insertAtt: sqlite.prepare(`INSERT OR IGNORE INTO attachments (id, session_key, message_text, file_name, mime_type, file_size, file_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+  getAttBySession: sqlite.prepare(`SELECT id, file_name, mime_type, file_size, message_text, created_at FROM attachments WHERE session_key = ? ORDER BY created_at`),
+  getAttById: sqlite.prepare(`SELECT file_name, mime_type, file_path FROM attachments WHERE id = ?`),
+  getAttPathsBySession: sqlite.prepare(`SELECT file_path FROM attachments WHERE session_key = ?`),
+  deleteAttBySession: sqlite.prepare(`DELETE FROM attachments WHERE session_key = ?`),
+};
 
 /** 持久化 deviceToken */
 function saveDeviceToken(token) {
@@ -830,8 +910,43 @@ app.post('/api/send', async (req, res) => {
   // 自动订阅请求中涉及的 sessionKey（用于事件路由）
   if (params?.sessionKey) session.sessionKeys.add(params.sessionKey);
 
+  // ====== 拦截 chat.send：保存附件到磁盘 ======
+  if (method === 'chat.send' && params?.attachments?.length > 0 && params?.sessionKey) {
+    const messageText = (params.content || '').substring(0, 100).trim();
+    const saveAtt = sqlite.transaction((atts) => {
+      for (const att of atts) {
+        if (!att.content) continue; // 没有 base64 数据则跳过
+        try {
+          const id = randomUUID();
+          const ext = mimeToExt(att.mimeType || att.type || 'application/octet-stream');
+          const fileName = att.fileName || att.name || `attachment.${ext}`;
+          const filePath = `${id}.${ext}`;
+          const buffer = Buffer.from(att.content, 'base64');
+          writeFileSync(join(UPLOADS_DIR, filePath), buffer);
+          stmts.insertAtt.run(id, params.sessionKey, messageText, fileName, att.mimeType || att.type || 'application/octet-stream', buffer.length, filePath, Date.now());
+          log.debug(`保存附件: ${fileName} (${(buffer.length / 1024).toFixed(1)}KB) → uploads/${filePath}`);
+        } catch (e) {
+          log.error('保存附件失败:', e.message);
+        }
+      }
+    });
+    saveAtt(params.attachments);
+  }
+
   try {
     let result = await sendGatewayRPC(sid, method, params);
+
+    // ====== 删除会话时同步清理 SQLite 标题和附件文件 ======
+    if (method === 'sessions.delete' && params?.key) {
+      stmts.deleteTitle.run(params.key);
+      // 清理附件文件
+      const attPaths = stmts.getAttPathsBySession.all(params.key);
+      for (const { file_path } of attPaths) {
+        try { unlinkSync(join(UPLOADS_DIR, file_path)); } catch { /* 文件可能已不在 */ }
+      }
+      stmts.deleteAttBySession.run(params.key);
+      log.debug(`清理已删除会话: ${params.key} (标题 + ${attPaths.length} 个附件)`);
+    }
 
     // ====== 过滤 sessions.list，只返回 ClawChat 创建的会话（带 clawchat- 前缀） ======
     if (method === 'sessions.list') {
@@ -845,14 +960,25 @@ app.post('/api/send', async (req, res) => {
         return true;
       };
 
+      /** 为会话注入服务端存储的标题 */
+      const injectTitles = (sessions) => sessions.map(s => {
+        const key = s?.key || s?.sessionKey || '';
+        const row = stmts.getTitle.get(key);
+        if (row?.title && (!s.title || s.title === key)) {
+          return { ...s, title: row.title };
+        }
+        return s;
+      });
+
       if (result?.sessions && Array.isArray(result.sessions)) {
         log.debug(`sessions.list 过滤前: ${result.sessions.length} 条, userId=${userId}`);
-        result = { ...result, sessions: result.sessions.filter(filterSession) };
+        const filtered = result.sessions.filter(filterSession);
+        result = { ...result, sessions: injectTitles(filtered) };
         log.debug(`sessions.list 过滤后: ${result.sessions.length} 条`);
       } else if (result?.items && Array.isArray(result.items)) {
-        result = { ...result, items: result.items.filter(filterSession) };
+        result = { ...result, items: injectTitles(result.items.filter(filterSession)) };
       } else if (Array.isArray(result)) {
-        result = result.filter(filterSession);
+        result = injectTitles(result.filter(filterSession));
       } else {
         log.debug(`sessions.list 响应格式未知: ${JSON.stringify(result).substring(0, 300)}`);
       }
@@ -880,6 +1006,68 @@ app.get('/api/progress', (req, res) => {
   if (!sid) return res.status(400).json({ ok: false, error: '缺少 sid' });
   if (!sessions.has(sid)) return res.status(404).json({ ok: false, error: '会话不存在' });
   res.json({ ok: true, sid, busy: false, state: 'idle', updatedAt: Date.now() });
+});
+
+/** POST /api/session-title — 保存会话标题 */
+app.post('/api/session-title', (req, res) => {
+  const { sid, sessionKey, title } = req.body || {};
+  const session = sessions.get(sid);
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+  if (!sessionKey || !title) return res.status(400).json({ ok: false, error: '缺少参数' });
+
+  stmts.upsertTitle.run(sessionKey, title, Date.now());
+  log.debug(`保存会话标题: ${sessionKey} → ${title}`);
+  res.json({ ok: true });
+});
+
+/** GET /api/session-titles — 获取用户的所有会话标题 */
+app.get('/api/session-titles', (req, res) => {
+  const sid = String(req.query.sid || '');
+  const session = sessions.get(sid);
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+
+  // 只返回当前用户的标题
+  const userId = session.userId || session.username || 'default';
+  const rows = stmts.getTitlesByUser.all(`%:clawchat-${userId}%`);
+  const userTitles = {};
+  for (const row of rows) {
+    userTitles[row.session_key] = row.title;
+  }
+  res.json({ ok: true, titles: userTitles });
+});
+
+/** GET /api/session-attachments — 获取会话的所有附件元数据 */
+app.get('/api/session-attachments', (req, res) => {
+  const sid = String(req.query.sid || '');
+  const sessionKey = String(req.query.sessionKey || '');
+  const session = sessions.get(sid);
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+  if (!sessionKey) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
+
+  const rows = stmts.getAttBySession.all(sessionKey);
+  const attachments = rows.map(r => ({
+    id: r.id,
+    name: r.file_name,
+    type: r.mime_type,
+    size: r.file_size,
+    url: `/api/attachment/${r.id}`,
+    messageText: r.message_text,
+    createdAt: r.created_at,
+  }));
+  res.json({ ok: true, attachments });
+});
+
+/** GET /api/attachment/:id — 下载/显示附件文件 */
+app.get('/api/attachment/:id', (req, res) => {
+  const row = stmts.getAttById.get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Attachment not found' });
+
+  const filePath = join(UPLOADS_DIR, row.file_path);
+  if (!existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+
+  res.setHeader('Content-Type', row.mime_type);
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); // 附件不变，长缓存
+  res.sendFile(filePath);
 });
 
 // ==================== 定期清理 ====================

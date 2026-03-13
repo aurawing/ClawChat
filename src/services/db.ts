@@ -42,7 +42,13 @@ export async function deleteSession(key: string): Promise<void> {
 }
 
 export async function updateSessionTitle(key: string, title: string): Promise<void> {
-  await db.sessions.update(key, { title, updatedAt: Date.now() });
+  // 使用 put 确保即使 session 不存在也能创建（而非 update 静默忽略）
+  const existing = await db.sessions.get(key);
+  if (existing) {
+    await db.sessions.update(key, { title, updatedAt: Date.now() });
+  } else {
+    await db.sessions.put({ key, title, updatedAt: Date.now() });
+  }
 }
 
 // ===== Message 操作 =====
@@ -53,10 +59,18 @@ export async function getMessages(sessionKey: string): Promise<Message[]> {
 
 export async function saveMessage(message: Message): Promise<void> {
   await db.messages.put(message);
-  // 同时更新会话的最后消息
+  // 同时更新（或创建）会话记录
   const session = await db.sessions.get(message.sessionKey);
   if (session) {
     await db.sessions.update(message.sessionKey, {
+      lastMessage: message.content.slice(0, 100),
+      updatedAt: Date.now(),
+    });
+  } else {
+    // session 不存在时自动创建
+    await db.sessions.put({
+      key: message.sessionKey,
+      title: '新对话',
       lastMessage: message.content.slice(0, 100),
       updatedAt: Date.now(),
     });
