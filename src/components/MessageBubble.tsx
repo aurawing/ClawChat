@@ -18,17 +18,17 @@ interface MessageBubbleProps {
 function SmartImage({
   att,
   className,
-  onClick,
+  onClickSrc,
 }: {
   att: FileAttachment;
   className?: string;
-  onClick?: () => void;
+  onClickSrc?: (actualSrc: string) => void;
 }) {
   const [src, setSrc] = useState<string>(() => getInitialSrc(att));
   const [retried, setRetried] = useState(false);
 
   const handleError = useCallback(async () => {
-    if (retried) return; // 只重试一次
+    if (retried) return;
     setRetried(true);
 
     // 尝试通过 fetch（走 CapacitorHttp 原生通道）下载
@@ -56,13 +56,18 @@ function SmartImage({
     }
   }, [att, retried]);
 
+  const handleClick = useCallback(() => {
+    // 传递实际加载成功的 src 给查看器
+    if (onClickSrc) onClickSrc(src);
+  }, [onClickSrc, src]);
+
   return (
     <img
       src={src}
       alt={att.name}
       className={className}
       loading="lazy"
-      onClick={onClick}
+      onClick={handleClick}
       onError={handleError}
     />
   );
@@ -153,7 +158,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                       <SmartImage
                         att={att}
                         className="max-h-48 max-w-full rounded-xl border border-neutral-700 object-contain cursor-pointer active:opacity-80 transition-opacity"
-                        onClick={() => setViewerSrc(getInitialSrc(att))}
+                        onClickSrc={(actualSrc) => setViewerSrc(actualSrc)}
                       />
                     ) : (
                       <div className="flex items-center gap-2 bg-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-300 border border-neutral-700">

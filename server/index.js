@@ -266,7 +266,7 @@ function createConnectFrame(nonce) {
       client: { id: 'gateway-client', version: '1.0.0', platform: 'web', mode: 'backend' },
       role: 'operator',
       scopes: SCOPES,
-      caps: [],
+      caps: ['tool-events'],
       commands: [],
       permissions: {},
       auth,

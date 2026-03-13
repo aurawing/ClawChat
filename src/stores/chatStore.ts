@@ -18,10 +18,21 @@ import * as db from '../services/db';
 
 // ==================== 辅助函数 ====================
 
-/** 去除思维链标签 */
+/** 提取思维链内容（<thinking>...</thinking> 标签中的内容） */
+function extractThinkingContent(text: string): string {
+  const matches: string[] = [];
+  const re = /<\s*think(?:ing)?\s*>([\s\S]*?)(?:<\s*\/\s*think(?:ing)?\s*>|$)/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[1]?.trim()) matches.push(m[1].trim());
+  }
+  return matches.join('\n\n');
+}
+
+/** 去除思维链标签（保留非思维链内容） */
 function stripThinkingTags(text: string): string {
   return text
-    .replace(/<\s*think(?:ing)?\s*>[\s\S]*?<\s*\/\s*think(?:ing)?\s*>/gi, '')
+    .replace(/<\s*think(?:ing)?\s*>[\s\S]*?(?:<\s*\/\s*think(?:ing)?\s*>|$)/gi, '')
     .replace(
       /Conversation info \(untrusted metadata\):\s*```json[\s\S]*?```\s*/gi,
       ''
@@ -317,6 +328,7 @@ interface ChatState {
   isStreaming: boolean;
   currentRunId: string | null;
   currentAiText: string;
+  currentAiThinking: string;
   currentAiMessageId: string | null;
 
   // 工具调用
@@ -371,23 +383,28 @@ export const useChatStore = create<ChatState>((set, get) => {
     const { state: chatState } = payload;
 
     if (chatState === 'delta') {
-      const text = extractText(payload.message);
-      const currentText = state.currentAiText;
-      if (text && text.length > currentText.length) {
-        const msgId = state.currentAiMessageId || `ai-${uuid()}`;
-        set({
-          isStreaming: true,
-          currentAiText: text,
-          currentAiMessageId: msgId,
-          currentRunId: payload.runId || state.currentRunId,
-          lastAbortedUserMsgId: null,
-        });
-      }
+      const rawText = extractText(payload.message);
+      if (!rawText) return;
+      const thinking = extractThinkingContent(rawText);
+      const text = stripThinkingTags(rawText);
+      const msgId = state.currentAiMessageId || `ai-${uuid()}`;
+
+      const updates: Record<string, unknown> = {
+        isStreaming: true,
+        currentAiMessageId: msgId,
+        currentRunId: payload.runId || state.currentRunId,
+        lastAbortedUserMsgId: null,
+      };
+      if (text && text.length > state.currentAiText.length) updates.currentAiText = text;
+      if (thinking && thinking.length > state.currentAiThinking.length) updates.currentAiThinking = thinking;
+      set(updates as Partial<ChatState>);
       return;
     }
 
     if (chatState === 'final') {
-      const text = extractText(payload.message);
+      const rawText = extractText(payload.message);
+      const text = rawText ? stripThinkingTags(rawText) : '';
+      const thinking = rawText ? extractThinkingContent(rawText) : '';
       const currentText = state.currentAiText;
 
       // 忽略空 final
@@ -395,14 +412,16 @@ export const useChatStore = create<ChatState>((set, get) => {
 
       const msgId = state.currentAiMessageId || `ai-${uuid()}`;
       const finalText = text || currentText;
+      const finalThinking = thinking || state.currentAiThinking;
 
-      if (finalText) {
+      if (finalText || finalThinking) {
         // 创建最终消息
         const aiMsg: Message = {
           id: msgId,
           sessionKey: state.currentSessionKey || '',
           role: 'assistant',
           content: finalText,
+          thinking: finalThinking || undefined,
           toolCalls: Array.from(state.toolCards.values()),
           createdAt: Date.now(),
           isStreaming: false,
@@ -415,6 +434,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           ],
           isStreaming: false,
           currentAiText: '',
+          currentAiThinking: '',
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
@@ -456,6 +476,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         set({
           isStreaming: false,
           currentAiText: '',
+          currentAiThinking: '',
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
@@ -482,6 +503,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           messages: [...s.messages.filter((m) => m.id !== state.currentAiMessageId), aiMsg],
           isStreaming: false,
           currentAiText: '',
+          currentAiThinking: '',
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
@@ -491,6 +513,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         set({
           isStreaming: false,
           currentAiText: '',
+          currentAiThinking: '',
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
@@ -513,6 +536,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         messages: [...s.messages, errorMessage],
         isStreaming: false,
         currentAiText: '',
+        currentAiThinking: '',
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
@@ -542,19 +566,28 @@ export const useChatStore = create<ChatState>((set, get) => {
       return;
     }
 
-    // assistant 流 — 高频文本累积
+    // assistant 流 — 高频文本累积 + 思维链提取
     if (stream === 'assistant') {
       const text = data?.text;
       if (text && typeof text === 'string') {
-        const cleaned = stripThinkingTags(text as string);
-        const currentText = state.currentAiText;
-        if (cleaned && cleaned.length > currentText.length) {
-          const msgId = state.currentAiMessageId || `ai-${uuid()}`;
-          set({
-            currentAiText: cleaned,
-            currentAiMessageId: msgId,
-            currentRunId: payload.runId || state.currentRunId,
-          });
+        const thinking = extractThinkingContent(text);
+        const cleaned = stripThinkingTags(text);
+        const msgId = state.currentAiMessageId || `ai-${uuid()}`;
+
+        const updates: Partial<ChatState> = {
+          currentAiMessageId: msgId,
+          currentRunId: payload.runId || state.currentRunId,
+        };
+
+        if (cleaned && cleaned.length > state.currentAiText.length) {
+          updates.currentAiText = cleaned;
+        }
+        if (thinking && thinking.length > state.currentAiThinking.length) {
+          updates.currentAiThinking = thinking;
+        }
+
+        if (updates.currentAiText || updates.currentAiThinking) {
+          set(updates as ChatState);
         }
       }
       return;
@@ -644,6 +677,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     isStreaming: false,
     currentRunId: null,
     currentAiText: '',
+    currentAiThinking: '',
     currentAiMessageId: null,
     toolCards: new Map(),
     lastAbortedUserMsgId: null,
@@ -709,6 +743,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         sessions: [],
         isStreaming: false,
         currentAiText: '',
+        currentAiThinking: '',
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
@@ -720,6 +755,24 @@ export const useChatStore = create<ChatState>((set, get) => {
       const state = get();
       const sessionKey = state.currentSessionKey;
       if (!sessionKey) return;
+
+      // ——— 如果当前 session 不在列表中，说明是新会话的第一条消息 ———
+      const isNewSession = !state.sessions.some((s) => s.key === sessionKey);
+      if (isNewSession) {
+        const title = generateSessionTitle(content); // 用用户问题做标题
+        const newSession: Session = {
+          key: sessionKey,
+          title,
+          lastMessage: content.length > 40 ? content.substring(0, 40) + '…' : content,
+          updatedAt: Date.now(),
+        };
+        set((s) => ({
+          sessions: [newSession, ...s.sessions],
+        }));
+        // 持久化标题
+        db.updateSessionTitle(sessionKey, title).catch(() => {});
+        apiClient.saveSessionTitle(sessionKey, title).catch(() => {});
+      }
 
       // 创建用户消息
       const userMsg: Message = {
@@ -783,6 +836,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         messages: [],
         isStreaming: false,
         currentAiText: '',
+        currentAiThinking: '',
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
@@ -792,7 +846,10 @@ export const useChatStore = create<ChatState>((set, get) => {
       get().loadHistory();
     },
 
-    /** 新建会话 - 生成唯一 sessionKey */
+    /**
+     * 新建会话 — 仅生成 sessionKey 并清空状态，
+     * 不在列表中创建条目；等用户发送第一条消息时才创建。
+     */
     createNewSession: () => {
       const baseKey = apiClient.sessionKey;
       if (!baseKey) return;
@@ -804,11 +861,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       const suffix = Date.now().toString(36); // 短时间戳作后缀
       const newKey = `${prefix}:clawchat-${userTag}-${suffix}`;
 
+      // 只切换到新 key、清空消息，不加入 sessions 列表
       set({
         currentSessionKey: newKey,
         messages: [],
         isStreaming: false,
         currentAiText: '',
+        currentAiThinking: '',
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
