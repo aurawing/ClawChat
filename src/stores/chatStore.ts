@@ -225,13 +225,73 @@ function shouldSkipRole(role?: string): boolean {
   return skip.has(role);
 }
 
-/** 从消息内容生成有意义的会话标题 */
+/** 从消息内容生成有意义的会话标题（本地快速回退） */
 function generateSessionTitle(content: string): string {
-  // 去掉换行取第一行
   const firstLine = content.split('\n')[0].trim();
   if (!firstLine) return '新对话';
-  // 截断到合理长度
   return firstLine.length > 30 ? firstLine.substring(0, 30) + '…' : firstLine;
+}
+
+// ==================== AI 标题生成 ====================
+
+/**
+ * 追踪正在进行的标题生成请求
+ * tempSessionKey → { originalSessionKey, accumText, resolve }
+ */
+const titleGenMap = new Map<
+  string,
+  { originalKey: string; accumText: string; resolve: (title: string) => void }
+>();
+
+/**
+ * 用 AI 为会话生成标题（方式2：临时 session，用完即删）
+ * - 创建临时 sessionKey
+ * - 发送摘要请求
+ * - 监听 AI 回复，获取标题
+ * - 删除临时 session
+ */
+async function requestAITitle(
+  userMessage: string,
+  aiMessage: string,
+  originalSessionKey: string
+): Promise<string> {
+  // 生成临时 sessionKey（带 _sys 标记，不会匹配任何用户的过滤规则）
+  const baseKey = apiClient.sessionKey;
+  if (!baseKey) return generateSessionTitle(userMessage);
+  const parts = baseKey.split(':');
+  const prefix = parts.slice(0, 2).join(':');
+  const tempKey = `${prefix}:clawchat-_sys-titlegen-${Date.now().toString(36)}`;
+
+  const prompt = `请用不超过15个字概括以下对话的主题。要求：只输出标题文字，不要引号、标点和任何其他说明。\n\n用户：${userMessage.substring(0, 300)}\nAI：${aiMessage.substring(0, 300)}`;
+
+  return new Promise<string>((resolve) => {
+    // 15秒超时，回退到本地标题
+    const timeout = setTimeout(() => {
+      titleGenMap.delete(tempKey);
+      resolve(generateSessionTitle(userMessage));
+      // 尝试删除临时 session（可能失败，忽略）
+      apiClient.sessionsDelete(tempKey).catch(() => {});
+    }, 15000);
+
+    titleGenMap.set(tempKey, {
+      originalKey: originalSessionKey,
+      accumText: '',
+      resolve: (title: string) => {
+        clearTimeout(timeout);
+        titleGenMap.delete(tempKey);
+        resolve(title);
+        // 清理临时 session
+        apiClient.sessionsDelete(tempKey).catch(() => {});
+      },
+    });
+
+    // 发送 AI 请求
+    apiClient.chatSend(tempKey, prompt).catch(() => {
+      clearTimeout(timeout);
+      titleGenMap.delete(tempKey);
+      resolve(generateSessionTitle(userMessage));
+    });
+  });
 }
 
 // ==================== Store 类型 ====================
@@ -285,6 +345,22 @@ export const useChatStore = create<ChatState>((set, get) => {
 
   /** 处理 chat 事件 */
   function handleChatEvent(payload: ChatEventPayload) {
+    // ====== 拦截标题生成会话的事件 ======
+    if (payload.sessionKey && titleGenMap.has(payload.sessionKey)) {
+      const gen = titleGenMap.get(payload.sessionKey)!;
+      const text = extractText(payload.message);
+      if (payload.state === 'delta' && text) {
+        gen.accumText = text;
+      } else if (payload.state === 'final') {
+        const finalText = text || gen.accumText;
+        const title = finalText.replace(/["""'']/g, '').trim();
+        gen.resolve(title || '新对话');
+      } else if (payload.state === 'aborted' || payload.state === 'error') {
+        gen.resolve(gen.accumText.trim() || '新对话');
+      }
+      return; // 标题生成事件不进入正常消息流
+    }
+
     const state = get();
     // 过滤非当前会话
     if (payload.sessionKey && payload.sessionKey !== state.currentSessionKey && state.currentSessionKey) {
@@ -347,8 +423,31 @@ export const useChatStore = create<ChatState>((set, get) => {
         // 持久化
         db.saveMessage(aiMsg);
 
-        // 如果是第一条 AI 回复, 刷新会话列表（可能生成了新标题）
+        // 如果是第一条 AI 回复, 用 AI 生成会话标题
         if (state.messages.filter(m => m.role === 'assistant').length === 0) {
+          const firstUserMsg = state.messages.find(m => m.role === 'user');
+          const sessionKeyForTitle = state.currentSessionKey;
+          if (firstUserMsg && sessionKeyForTitle) {
+            // 异步生成标题，不阻塞主流程
+            requestAITitle(firstUserMsg.content, finalText, sessionKeyForTitle)
+              .then((title) => {
+                if (!title || title === '新对话') return;
+                const cleanTitle = title.length > 25 ? title.substring(0, 25) + '…' : title;
+                console.log('[store] AI 生成标题:', cleanTitle, '会话:', sessionKeyForTitle);
+                // 更新 sessions 列表中对应会话的标题
+                set((s) => ({
+                  sessions: s.sessions.map((sess) =>
+                    sess.key === sessionKeyForTitle
+                      ? { ...sess, title: cleanTitle }
+                      : sess
+                  ),
+                }));
+                // 保存到本地 DB
+                db.updateSessionTitle(sessionKeyForTitle, cleanTitle).catch(() => {});
+              })
+              .catch((e) => console.warn('[store] AI 标题生成失败:', e));
+          }
+          // 同时刷新会话列表（确保新会话出现在列表中）
           setTimeout(() => get().loadSessions(), 500);
         }
       } else {
@@ -787,11 +886,21 @@ export const useChatStore = create<ChatState>((set, get) => {
           return true;
         });
 
+        // 从本地 DB 加载已缓存的 AI 标题
+        const localSessions = await db.getSessions();
+        const localTitleMap = new Map<string, string>();
+        for (const ls of localSessions) {
+          if (ls.title && ls.title !== '新对话' && ls.title !== '主对话') {
+            localTitleMap.set(ls.key, ls.title);
+          }
+        }
+
         const sessions: Session[] = filteredSessions.map((s) => {
-          // 如果没有标题或标题只是 sessionKey 则生成有意义的标题
-          let title = s.title;
+          // 优先使用本地缓存的 AI 标题
+          const cachedTitle = localTitleMap.get(s.key);
+          let title = cachedTitle || s.title;
+
           if (!title || title === s.key || /^agent:/.test(title)) {
-            // 尝试从 lastMessage 生成标题
             if (s.lastMessage) {
               title = generateSessionTitle(s.lastMessage);
             } else {
