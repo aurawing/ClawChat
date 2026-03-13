@@ -118,6 +118,13 @@ export interface ToolCall {
   finishedAt?: number;
 }
 
+/** 消息内容块 — 用于记录思维链 / 工具调用的交错顺序 */
+export interface MessageBlock {
+  type: 'thinking' | 'tool';
+  content?: string;       // thinking 块的文本
+  toolCallId?: string;    // tool 块对应的 toolCallId
+}
+
 export interface Message {
   id: string;
   sessionKey: string;
@@ -125,6 +132,7 @@ export interface Message {
   content: string;
   thinking?: string;
   toolCalls?: ToolCall[];
+  blocks?: MessageBlock[];   // 思维链 / 工具调用的交错顺序
   attachments?: FileAttachment[];
   createdAt: number;
   isStreaming?: boolean;

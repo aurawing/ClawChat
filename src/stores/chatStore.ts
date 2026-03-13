@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { apiClient, uuid } from '../services/api-client';
 import type {
   Message,
+  MessageBlock,
   Session,
   ToolCall,
   ConnectionStatus,
@@ -334,6 +335,10 @@ interface ChatState {
   // 工具调用
   toolCards: Map<string, ToolCall>;
 
+  // 内容块顺序追踪（思维链 / 工具调用交错）
+  currentBlocks: MessageBlock[];
+  _blockThinkingBase: number; // 当前 thinking segment 在 currentAiThinking 中的起始位置
+
   // 中止后的操作状态
   lastAbortedUserMsgId: string | null;
 
@@ -354,6 +359,39 @@ interface ChatState {
 }
 
 /**
+ * 从 content block 数组中提取纯文本
+ * Anthropic 格式：[{type:"text", text:"..."}, {type:"tool_use", id:..., name:..., input:{...}}]
+ */
+function extractContentBlockText(content: unknown): string | undefined {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const texts = content
+      .filter((b: Record<string, unknown>) => b && (b.type === 'text' || typeof b.text === 'string'))
+      .map((b: Record<string, unknown>) => (b.text as string) || '')
+      .filter(Boolean);
+    return texts.length > 0 ? texts.join('\n') : undefined;
+  }
+  return undefined;
+}
+
+/** 快照当前 blocks（补全最后一个 thinking 段） */
+function _snapshotBlocks(state: ChatState): MessageBlock[] {
+  const blocks = [...state.currentBlocks];
+  const thinkingLen = state.currentAiThinking.length;
+  const base = state._blockThinkingBase;
+  // 如果有未分配到 block 的新 thinking 内容，创建或更新最后一个 thinking block
+  if (thinkingLen > base) {
+    const newContent = state.currentAiThinking.substring(base);
+    if (blocks.length > 0 && blocks[blocks.length - 1].type === 'thinking') {
+      blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], content: newContent };
+    } else {
+      blocks.push({ type: 'thinking', content: newContent });
+    }
+  }
+  return blocks;
+}
+
+/**
  * 将当前流式输出中的 AI 消息（含工具调用、思维链）保存到 IndexedDB。
  * 在切换会话 / 新建会话前调用，避免丢失正在执行中的工具调用内容。
  */
@@ -369,8 +407,9 @@ function _saveStreamingStateToDb(state: ChatState) {
     content: currentAiText || '',
     thinking: currentAiThinking || undefined,
     toolCalls: toolCards.size > 0 ? Array.from(toolCards.values()) : undefined,
+    blocks: _snapshotBlocks(state),
     createdAt: Date.now(),
-    isStreaming: false, // 存 DB 时标记为非流式
+    isStreaming: false,
   };
   db.saveMessage(partialMsg).catch((e) =>
     console.warn('[store] 保存流式状态失败:', e)
@@ -386,6 +425,8 @@ interface BgStreamState {
   text: string;
   thinking: string;
   toolCards: Map<string, ToolCall>;
+  blocks: MessageBlock[];
+  thinkingBase: number; // thinking 长度基准（用于 blocks 切分）
   createdAt: number;
 }
 const bgStreams = new Map<string, BgStreamState>();
@@ -397,20 +438,30 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
 
   if (stream === 'lifecycle') {
     if (data?.phase === 'start') {
-      // 新一轮开始，初始化缓冲区
       bgStreams.set(sk, {
         msgId: `ai-${uuid()}`,
         sessionKey: sk,
         text: '',
         thinking: '',
         toolCards: new Map(),
+        blocks: [],
+        thinkingBase: 0,
         createdAt: Date.now(),
       });
     }
     if (data?.phase === 'end') {
-      // 生命周期结束，保存到 DB 并清理
       const bg = bgStreams.get(sk);
       if (bg && (bg.text || bg.thinking || bg.toolCards.size > 0)) {
+        // 快照最后一个 thinking block
+        const blocks = [...bg.blocks];
+        if (bg.thinking.length > bg.thinkingBase) {
+          const tc = bg.thinking.substring(bg.thinkingBase);
+          if (blocks.length > 0 && blocks[blocks.length - 1].type === 'thinking') {
+            blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], content: tc };
+          } else {
+            blocks.push({ type: 'thinking', content: tc });
+          }
+        }
         const msg: Message = {
           id: bg.msgId,
           sessionKey: sk,
@@ -418,6 +469,7 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
           content: bg.text,
           thinking: bg.thinking || undefined,
           toolCalls: bg.toolCards.size > 0 ? Array.from(bg.toolCards.values()) : undefined,
+          blocks: blocks.length > 0 ? blocks : undefined,
           createdAt: bg.createdAt,
           isStreaming: false,
         };
@@ -431,18 +483,19 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
   }
 
   // 确保缓冲区存在
-  let bg = bgStreams.get(sk);
-  if (!bg) {
-    bg = {
+  if (!bgStreams.has(sk)) {
+    bgStreams.set(sk, {
       msgId: `ai-${uuid()}`,
       sessionKey: sk,
       text: '',
       thinking: '',
       toolCards: new Map(),
+      blocks: [],
+      thinkingBase: 0,
       createdAt: Date.now(),
-    };
-    bgStreams.set(sk, bg);
+    });
   }
+  const bg = bgStreams.get(sk)!;
 
   if (stream === 'assistant') {
     const text = data?.text;
@@ -478,7 +531,20 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
     const outputStr = outputRaw ? (typeof outputRaw === 'string' ? outputRaw : JSON.stringify(outputRaw, null, 2)) : undefined;
     const errorStr = data?.error ? (typeof data.error === 'string' ? data.error : JSON.stringify(data.error)) : undefined;
 
-    if (!bg.toolCards.has(toolCallId as string)) {
+    const isNew = !bg.toolCards.has(toolCallId as string);
+    if (isNew) {
+      // 新工具：先快照当前 thinking 段，再添加 tool block
+      if (bg.thinking.length > bg.thinkingBase) {
+        const tc = bg.thinking.substring(bg.thinkingBase);
+        if (bg.blocks.length > 0 && bg.blocks[bg.blocks.length - 1].type === 'thinking') {
+          bg.blocks[bg.blocks.length - 1] = { type: 'thinking', content: tc };
+        } else {
+          bg.blocks.push({ type: 'thinking', content: tc });
+        }
+        bg.thinkingBase = bg.thinking.length;
+      }
+      bg.blocks.push({ type: 'tool', toolCallId: toolCallId as string });
+
       bg.toolCards.set(toolCallId as string, {
         id: toolCallId as string,
         name,
@@ -512,12 +578,25 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
     const text = rawText ? stripThinkingTags(rawText) : '';
     const thinking = rawText ? extractThinkingContent(rawText) : '';
 
-    // 合并后台缓冲区的工具调用数据
     const bg = bgStreams.get(sk);
     const toolCalls = bg && bg.toolCards.size > 0
       ? Array.from(bg.toolCards.values())
       : undefined;
     const finalThinking = thinking || bg?.thinking || undefined;
+
+    // 快照 blocks
+    let blocks: MessageBlock[] | undefined;
+    if (bg && bg.blocks.length > 0) {
+      blocks = [...bg.blocks];
+      if (bg.thinking.length > bg.thinkingBase) {
+        const tc = bg.thinking.substring(bg.thinkingBase);
+        if (blocks.length > 0 && blocks[blocks.length - 1].type === 'thinking') {
+          blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], content: tc };
+        } else {
+          blocks.push({ type: 'thinking', content: tc });
+        }
+      }
+    }
 
     if (text || toolCalls) {
       const msg: Message = {
@@ -527,6 +606,7 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
         content: text || bg?.text || '',
         thinking: finalThinking,
         toolCalls,
+        blocks,
         createdAt: Date.now(),
         isStreaming: false,
       };
@@ -570,9 +650,8 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     if (chatState === 'delta') {
       const rawText = extractText(payload.message);
-      if (!rawText) return;
-      const thinking = extractThinkingContent(rawText);
-      const text = stripThinkingTags(rawText);
+      const thinking = rawText ? extractThinkingContent(rawText) : '';
+      const text = rawText ? stripThinkingTags(rawText) : '';
       const msgId = state.currentAiMessageId || `ai-${uuid()}`;
 
       const updates: Record<string, unknown> = {
@@ -600,7 +679,60 @@ export const useChatStore = create<ChatState>((set, get) => {
             : thinking;
         }
       }
-      set(updates as Partial<ChatState>);
+
+      // ====== 从 delta 消息中提取 tool_use 块（工具调用输入）======
+      const msgContent = payload.message?.content;
+      if (Array.isArray(msgContent)) {
+        for (const block of msgContent) {
+          const b = block as unknown as Record<string, unknown>;
+          if (b.type === 'tool_use' && (b.id || b.tool_use_id)) {
+            const tcId = (b.id || b.tool_use_id) as string;
+            const tcName = (b.name as string) || 'tool';
+            const inputRaw = b.input;
+            const inputStr = inputRaw
+              ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2))
+              : undefined;
+            set((s) => {
+              const toolCards = new Map(s.toolCards);
+              if (toolCards.has(tcId)) {
+                const existing = toolCards.get(tcId)!;
+                toolCards.set(tcId, { ...existing, input: inputStr || existing.input });
+              } else {
+                toolCards.set(tcId, {
+                  id: tcId,
+                  name: tcName,
+                  status: 'running',
+                  input: inputStr,
+                  startedAt: Date.now(),
+                });
+              }
+              return { toolCards };
+            });
+          }
+          // 也提取 tool_result 块（工具调用输出）
+          if (b.type === 'tool_result' && (b.tool_use_id || b.id)) {
+            const tcId = (b.tool_use_id || b.id) as string;
+            const outputText = extractContentBlockText(b.content) || (b.output as string);
+            if (outputText) {
+              set((s) => {
+                const toolCards = new Map(s.toolCards);
+                if (toolCards.has(tcId)) {
+                  const existing = toolCards.get(tcId)!;
+                  toolCards.set(tcId, {
+                    ...existing,
+                    output: outputText,
+                    status: b.is_error ? 'error' : 'done',
+                    finishedAt: Date.now(),
+                  });
+                }
+                return { toolCards };
+              });
+            }
+          }
+        }
+      }
+
+      if (rawText) set(updates as Partial<ChatState>);
       return;
     }
 
@@ -618,6 +750,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       const finalThinking = thinking || state.currentAiThinking;
 
       if (finalText || finalThinking) {
+        // 快照 blocks
+        const finalBlocks = _snapshotBlocks(state);
+
         // 创建最终消息
         const aiMsg: Message = {
           id: msgId,
@@ -626,6 +761,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           content: finalText,
           thinking: finalThinking || undefined,
           toolCalls: Array.from(state.toolCards.values()),
+          blocks: finalBlocks.length > 0 ? finalBlocks : undefined,
           createdAt: Date.now(),
           isStreaming: false,
         };
@@ -641,6 +777,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
           lastAbortedUserMsgId: null,
         }));
 
@@ -683,6 +821,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
         });
       }
       return;
@@ -710,6 +850,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
           lastAbortedUserMsgId: lastUserMsg?.id || null,
         }));
       } else {
@@ -720,6 +862,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentAiMessageId: null,
           currentRunId: null,
           toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
           lastAbortedUserMsgId: lastUserMsg?.id || null,
         });
       }
@@ -743,6 +887,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
       }));
       return;
     }
@@ -827,9 +973,15 @@ export const useChatStore = create<ChatState>((set, get) => {
       // 提取工具 input — 尝试多种字段路径
       const inputRaw = data?.input ?? data?.arguments ?? data?.params
         ?? data?.tool_input ?? data?.command;
-      // 提取工具 output — 尝试多种字段路径
-      const outputRaw = data?.output ?? data?.result ?? data?.content
-        ?? data?.tool_result ?? data?.text ?? data?.response;
+      // 提取工具 output — 尝试多种字段路径 + content block 数组解析
+      let outputRaw = data?.output ?? data?.result ?? data?.tool_result ?? data?.response;
+      if (!outputRaw && data?.content) {
+        // content 可能是 [{type:"text", text:"..."}] 格式
+        outputRaw = extractContentBlockText(data.content) ?? data.content;
+      }
+      if (!outputRaw && data?.text && phase !== 'start') {
+        outputRaw = data.text;
+      }
       // 序列化
       const inputStr = inputRaw
         ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2))
@@ -846,7 +998,9 @@ export const useChatStore = create<ChatState>((set, get) => {
 
       set((s) => {
         const toolCards = new Map(s.toolCards);
-        if (!toolCards.has(toolCallId as string)) {
+        const isNew = !toolCards.has(toolCallId as string);
+
+        if (isNew) {
           toolCards.set(toolCallId as string, {
             id: toolCallId as string,
             name,
@@ -860,14 +1014,34 @@ export const useChatStore = create<ChatState>((set, get) => {
           const isFinished = phase === 'result' || phase === 'end' || phase === 'error' || phase === 'done';
           toolCards.set(toolCallId as string, {
             ...existing,
-            name: name !== 'tool' ? name : existing.name, // 保留更具体的名字
+            name: name !== 'tool' ? name : existing.name,
             status: phase === 'error' ? 'error' : (isFinished ? 'done' : existing.status),
             input: inputStr || existing.input,
             output: outputStr || errorStr || existing.output,
             finishedAt: isFinished ? Date.now() : existing.finishedAt,
           });
         }
-        return { toolCards };
+
+        // ====== 追踪 blocks 顺序 ======
+        let currentBlocks = s.currentBlocks;
+        let _blockThinkingBase = s._blockThinkingBase;
+        if (isNew) {
+          currentBlocks = [...currentBlocks];
+          // 快照当前 thinking 段到 block 中
+          if (s.currentAiThinking.length > _blockThinkingBase) {
+            const thinkSeg = s.currentAiThinking.substring(_blockThinkingBase);
+            if (currentBlocks.length > 0 && currentBlocks[currentBlocks.length - 1].type === 'thinking') {
+              currentBlocks[currentBlocks.length - 1] = { type: 'thinking', content: thinkSeg };
+            } else {
+              currentBlocks.push({ type: 'thinking', content: thinkSeg });
+            }
+            _blockThinkingBase = s.currentAiThinking.length;
+          }
+          // 添加 tool block
+          currentBlocks.push({ type: 'tool', toolCallId: toolCallId as string });
+        }
+
+        return { toolCards, currentBlocks, _blockThinkingBase };
       });
       return;
     }
@@ -921,6 +1095,8 @@ export const useChatStore = create<ChatState>((set, get) => {
     currentAiThinking: '',
     currentAiMessageId: null,
     toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
     lastAbortedUserMsgId: null,
 
     connect: (config: ServerConfig) => {
@@ -988,6 +1164,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
         lastAbortedUserMsgId: null,
       });
     },
@@ -1075,6 +1253,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
         lastAbortedUserMsgId: lastUserMsg?.id || null,
       });
     },
@@ -1092,6 +1272,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
         lastAbortedUserMsgId: null,
       });
       localStorage.setItem('clawchat-session-key', key);
@@ -1099,12 +1281,14 @@ export const useChatStore = create<ChatState>((set, get) => {
       // 检查目标会话是否有后台流式缓冲区（切走时还在输出的那段）
       const bg = bgStreams.get(key);
       if (bg) {
-        // 将后台缓冲区的状态"提升"到前台
+        // 将后台缓冲区的状态"提升"到前台（包括 blocks）
         set({
           currentAiMessageId: bg.msgId,
           currentAiText: bg.text,
           currentAiThinking: bg.thinking,
           toolCards: new Map(bg.toolCards),
+          currentBlocks: bg.blocks,
+          _blockThinkingBase: bg.thinkingBase,
           isStreaming: true,
         });
         bgStreams.delete(key);
@@ -1141,6 +1325,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
         lastAbortedUserMsgId: null,
       });
       localStorage.setItem('clawchat-session-key', newKey);
@@ -1178,6 +1364,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         const localToolCallsByText = new Map<string, ToolCall[]>();
         const localThinkingById = new Map<string, string>();
         const localThinkingByText = new Map<string, string>();
+        const localBlocksById = new Map<string, MessageBlock[]>();
+        const localBlocksByText = new Map<string, MessageBlock[]>();
 
         for (const lm of localMessages) {
           if (lm.attachments && lm.attachments.length > 0) {
@@ -1199,6 +1387,12 @@ export const useChatStore = create<ChatState>((set, get) => {
             localThinkingById.set(lm.id, lm.thinking);
             const tkKey = lm.content.substring(0, 50).trim();
             if (tkKey) localThinkingByText.set(tkKey, lm.thinking);
+          }
+          // 收集 blocks 顺序数据（用于交错渲染恢复）
+          if (lm.blocks && lm.blocks.length > 0 && lm.role === 'assistant') {
+            localBlocksById.set(lm.id, lm.blocks);
+            const bKey = lm.content.substring(0, 50).trim();
+            if (bKey) localBlocksByText.set(bKey, lm.blocks);
           }
         }
 
@@ -1305,9 +1499,10 @@ export const useChatStore = create<ChatState>((set, get) => {
 
           if (!text && attachments.length === 0) continue;
 
-          // ====== 恢复工具调用 + 思维链数据（从本地 DB）======
+          // ====== 恢复工具调用 + 思维链 + blocks 数据（从本地 DB）======
           let toolCalls: ToolCall[] | undefined;
           let thinking: string | undefined;
+          let blocks: MessageBlock[] | undefined;
           if (role === 'assistant') {
             const msgId = msg.id as string;
             const tcKey = text.substring(0, 50).trim();
@@ -1316,6 +1511,9 @@ export const useChatStore = create<ChatState>((set, get) => {
               || undefined;
             thinking = (msgId ? localThinkingById.get(msgId) : undefined)
               || (tcKey ? localThinkingByText.get(tcKey) : undefined)
+              || undefined;
+            blocks = (msgId ? localBlocksById.get(msgId) : undefined)
+              || (tcKey ? localBlocksByText.get(tcKey) : undefined)
               || undefined;
           }
 
@@ -1327,6 +1525,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             thinking,
             attachments: attachments.length > 0 ? attachments : undefined,
             toolCalls,
+            blocks,
             createdAt: msg.timestamp || Date.now(),
           });
         }
@@ -1516,6 +1715,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
         lastAbortedUserMsgId: null,
       });
 
@@ -1538,6 +1739,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
         lastAbortedUserMsgId: null,
       });
 

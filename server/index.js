@@ -488,6 +488,16 @@ function handleGatewayMessage(rawData) {
     if (stream === 'tool') {
       log.info(`🔧 Tool event: phase=${phase}, data keys=${JSON.stringify(Object.keys(msg.payload?.data || {}))}, data=${JSON.stringify(msg.payload?.data).substring(0, 500)}`);
     }
+    // chat 事件 delta 中的 tool_use 块日志
+    if (eventName === 'chat' && msg.payload?.state === 'delta') {
+      const content = msg.payload?.message?.content;
+      if (Array.isArray(content)) {
+        const toolUseBlocks = content.filter(b => b.type === 'tool_use' || b.type === 'tool_result');
+        if (toolUseBlocks.length > 0) {
+          log.info(`🔧 Chat delta tool blocks: ${JSON.stringify(toolUseBlocks).substring(0, 800)}`);
+        }
+      }
+    }
 
     const eventSessionKey = msg.payload?.sessionKey;
     if (eventSessionKey) {

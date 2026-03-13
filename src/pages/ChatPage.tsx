@@ -15,8 +15,11 @@ export default function ChatPage() {
     currentSessionKey,
     isStreaming,
     currentAiText,
+    currentAiThinking,
     currentAiMessageId,
     toolCards,
+    currentBlocks,
+    _blockThinkingBase,
     connectionStatus,
     serverConfig,
     username,
@@ -54,8 +57,24 @@ export default function ChatPage() {
   // 构造显示用的消息列表（包含流式中的 AI 消息和工具调用）
   const displayMessages = [...messages];
   const hasToolCards = toolCards.size > 0;
-  // 有文本或有工具调用时，显示流式 AI 消息
-  if (currentAiText || hasToolCards) {
+
+  // 实时快照 blocks（补全最后一个 thinking 段）
+  const liveBlocks = (() => {
+    if (!currentBlocks.length && !currentAiThinking) return undefined;
+    const blocks = [...currentBlocks];
+    if (currentAiThinking.length > _blockThinkingBase) {
+      const seg = currentAiThinking.substring(_blockThinkingBase);
+      if (blocks.length > 0 && blocks[blocks.length - 1].type === 'thinking') {
+        blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], content: seg };
+      } else {
+        blocks.push({ type: 'thinking', content: seg });
+      }
+    }
+    return blocks.length > 0 ? blocks : undefined;
+  })();
+
+  // 有文本或有工具调用或有思考时，显示流式 AI 消息
+  if (currentAiText || hasToolCards || currentAiThinking) {
     const msgId = currentAiMessageId || 'ai-streaming';
     const existing = displayMessages.find((m) => m.id === msgId);
     if (!existing) {
@@ -64,17 +83,20 @@ export default function ChatPage() {
         sessionKey: currentSessionKey || '',
         role: 'assistant',
         content: currentAiText || '',
+        thinking: currentAiThinking || undefined,
         toolCalls: Array.from(toolCards.values()),
+        blocks: liveBlocks,
         createdAt: Date.now(),
         isStreaming: true,
       };
       displayMessages.push(streamingMsg);
     } else {
-      // 更新已有的流式消息的工具调用
       const idx = displayMessages.indexOf(existing);
       displayMessages[idx] = {
         ...existing,
         toolCalls: Array.from(toolCards.values()),
+        thinking: currentAiThinking || existing.thinking,
+        blocks: liveBlocks || existing.blocks,
         content: currentAiText || existing.content,
         isStreaming: true,
       };
@@ -82,7 +104,7 @@ export default function ChatPage() {
   }
 
   // 是否显示"思考中"占位符：正在等待但还没有文本也没有工具调用
-  const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiMessageId;
+  const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiThinking && !currentAiMessageId;
 
   // 当前会话标题：优先使用 sessions 列表中的 AI 生成标题，回退到 sessionKey 解析
   const currentSession = sessions.find((s) => s.key === currentSessionKey);

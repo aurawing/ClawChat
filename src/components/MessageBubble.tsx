@@ -1,8 +1,8 @@
-import { useState, useCallback } from 'react';
-import type { Message, FileAttachment } from '../types';
+import { useState, useCallback, useMemo } from 'react';
+import type { Message, FileAttachment, ToolCall, MessageBlock } from '../types';
 import MarkdownRenderer from './MarkdownRenderer';
 import ThinkingBlock from './ThinkingBlock';
-import { ToolCallGroup } from './ToolCallBlock';
+import ToolCallBlock from './ToolCallBlock';
 import ImageViewer from './ImageViewer';
 
 interface MessageBubbleProps {
@@ -199,10 +199,38 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
   const hasToolCalls = message.toolCalls && message.toolCalls.length > 0;
   const isToolOnlyMsg = hasToolCalls && !message.content;
 
+  // 构建工具调用 ID → ToolCall 映射
+  const toolCallMap = useMemo(() => {
+    const map = new Map<string, ToolCall>();
+    if (message.toolCalls) {
+      for (const tc of message.toolCalls) map.set(tc.id, tc);
+    }
+    return map;
+  }, [message.toolCalls]);
+
+  // 判断是否使用交错渲染
+  const useBlocks = message.blocks && message.blocks.length > 0 && hasToolCalls;
+
+  // 收集已被 blocks 引用的 toolCallId，剩余的在 blocks 之后渲染
+  const blocksToolIds = useMemo(() => {
+    if (!useBlocks) return new Set<string>();
+    return new Set(
+      message.blocks!
+        .filter((b: MessageBlock) => b.type === 'tool' && b.toolCallId)
+        .map((b: MessageBlock) => b.toolCallId!)
+    );
+  }, [useBlocks, message.blocks]);
+
+  const remainingTools = useMemo(() => {
+    if (!hasToolCalls) return [];
+    if (!useBlocks) return message.toolCalls!;
+    return message.toolCalls!.filter((tc) => !blocksToolIds.has(tc.id));
+  }, [hasToolCalls, useBlocks, message.toolCalls, blocksToolIds]);
+
   return (
     <>
       <div className="flex justify-start mb-4">
-        {/* AI 头像 — 工具调用消息用齿轮图标，普通消息用闪电图标 */}
+        {/* AI 头像 */}
         <div className={`w-7 h-7 rounded-full flex items-center justify-center mr-2 mt-1 shrink-0 ${
           isToolOnlyMsg
             ? 'bg-gradient-to-br from-amber-500 to-orange-600'
@@ -222,25 +250,58 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
         <div className="max-w-[85%]">
           <div className="space-y-1">
-            {/* 思维链 */}
-            {message.thinking && (
-              <ThinkingBlock
-                content={message.thinking}
-                isStreaming={message.isStreaming && !message.content}
-              />
+            {/* ====== 交错渲染模式 — 思维链与工具调用按实际顺序展示 ====== */}
+            {useBlocks ? (
+              <>
+                {message.blocks!.map((block: MessageBlock, i: number) => {
+                  if (block.type === 'thinking' && block.content) {
+                    return (
+                      <ThinkingBlock
+                        key={`blk-t-${i}`}
+                        content={block.content}
+                        isStreaming={
+                          message.isStreaming &&
+                          i === message.blocks!.length - 1 &&
+                          !message.content
+                        }
+                      />
+                    );
+                  }
+                  if (block.type === 'tool' && block.toolCallId) {
+                    const tc = toolCallMap.get(block.toolCallId);
+                    if (tc) {
+                      return <ToolCallBlock key={`blk-tc-${block.toolCallId}`} toolCall={tc} />;
+                    }
+                  }
+                  return null;
+                })}
+                {/* blocks 中未引用的工具调用（兼容旧数据） */}
+                {remainingTools.map((tc) => (
+                  <ToolCallBlock key={`tc-rem-${tc.id}`} toolCall={tc} />
+                ))}
+              </>
+            ) : (
+              /* ====== 传统渲染模式（无 blocks 时回退） ====== */
+              <>
+                {message.thinking && (
+                  <ThinkingBlock
+                    content={message.thinking}
+                    isStreaming={message.isStreaming && !message.content}
+                  />
+                )}
+                {message.toolCalls && message.toolCalls.length > 0 &&
+                  message.toolCalls.map((tc) => (
+                    <ToolCallBlock key={`tc-${tc.id}`} toolCall={tc} />
+                  ))
+                }
+              </>
             )}
 
-            {/* 工具调用 — 层次化展示 */}
-            {message.toolCalls && message.toolCalls.length > 0 && (
-              <ToolCallGroup toolCalls={message.toolCalls} />
-            )}
-
-            {/* 主要内容（Markdown 中的图片也可点击放大） */}
+            {/* 主要内容 */}
             {message.content && (
               <div
                 className="text-neutral-100"
                 onClick={(e) => {
-                  // 检查是否点击了 Markdown 渲染出的 <img> 标签
                   const target = e.target as HTMLElement;
                   if (target.tagName === 'IMG') {
                     const imgSrc = (target as HTMLImageElement).src;
