@@ -3,10 +3,14 @@
  * 完全兼容 qingchencloud/clawapp 协议
  *
  * 架构：
- * - 手机 ←SSE+POST→ 代理服务端 ←WS→ OpenClaw Gateway
- * - POST /api/connect   建立会话（握手 Gateway）
+ * - 多个 APP ←SSE+POST→ 代理服务端 ←共享WS→ OpenClaw Gateway
+ * - 支持多用户：每个用户独立 sessionKey，对话完全隔离
+ * - 设备身份共享：Gateway 只需配对一次
+ *
+ * API：
+ * - POST /api/connect   建立用户会话
  * - GET  /api/events    SSE 事件流（服务端推送）
- * - POST /api/send      发送请求（RPC 转发）
+ * - POST /api/send      发送 RPC 请求
  * - POST /api/disconnect 断开会话
  */
 
@@ -33,8 +37,13 @@ if (!existsSync(ENV_PATH)) {
     '# ClawChat 配置文件（自动生成）',
     'PROXY_PORT=3210',
     '',
-    '# 客户端连接密码（登录时填写的 Token）',
+    '# 单用户模式：客户端连接密码',
     `PROXY_TOKEN=${tmpToken}`,
+    '',
+    '# 多用户模式（每个用户独立对话，设备只需配对一次）',
+    '# 格式: 用户名:连接密码,用户名2:连接密码2',
+    '# PROXY_USERS=alice:tokenA,bob:tokenB',
+    '# 注意: 设置 PROXY_USERS 后，PROXY_TOKEN 仅作单用户兜底',
     '',
     '# OpenClaw Gateway 地址',
     'OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789',
@@ -51,7 +60,6 @@ if (!existsSync(ENV_PATH)) {
   console.log(`[INFO] 自动生成的连接密码: ${tmpToken}`);
 }
 
-// 加载环境变量
 config({ path: ENV_PATH });
 
 // ==================== 配置 ====================
@@ -64,7 +72,20 @@ const CONFIG = {
   distPath: join(__dirname, '..', 'dist'),
 };
 
-// ==================== Ed25519 设备密钥 ====================
+// ==================== 多用户配置 ====================
+// 格式: PROXY_USERS=alice:tokenA,bob:tokenB
+const USERS = new Map();
+(process.env.PROXY_USERS || '').split(',').map(s => s.trim()).filter(Boolean).forEach(entry => {
+  const idx = entry.indexOf(':');
+  if (idx > 0) {
+    const userId = entry.substring(0, idx).trim();
+    const userToken = entry.substring(idx + 1).trim();
+    if (userId && userToken) USERS.set(userId, userToken);
+  }
+});
+const MULTI_USER = USERS.size > 0;
+
+// ==================== Ed25519 设备密钥（全局共享） ====================
 const DEVICE_KEY_PATH = join(__dirname, '.device-key.json');
 const deviceKey = (() => {
   if (existsSync(DEVICE_KEY_PATH)) {
@@ -74,13 +95,28 @@ const deviceKey = (() => {
   const pubRaw = publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
   const dk = {
     deviceId: createHash('sha256').update(pubRaw).digest('hex'),
-    publicKey: pubRaw.toString('base64url'),
+    publicKey: pubRaw.toString('base64'),
     privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
   };
   writeFileSync(DEVICE_KEY_PATH, JSON.stringify(dk, null, 2));
   return dk;
 })();
 const devicePrivateKey = createPrivateKey(deviceKey.privateKeyPem);
+
+/** 持久化 deviceToken */
+function saveDeviceToken(token) {
+  if (!token) return;
+  try {
+    const data = JSON.parse(readFileSync(DEVICE_KEY_PATH, 'utf8'));
+    if (data.deviceToken === token) return;
+    data.deviceToken = token;
+    writeFileSync(DEVICE_KEY_PATH, JSON.stringify(data, null, 2));
+    deviceKey.deviceToken = token;
+    log.info(`deviceToken 已持久化到 ${DEVICE_KEY_PATH}`);
+  } catch (e) {
+    log.error('保存 deviceToken 失败:', e.message);
+  }
+}
 
 // ==================== 日志 ====================
 const log = {
@@ -98,28 +134,46 @@ const SESSION_IDLE_TIMEOUT = 300000;
 const UPSTREAM_LINGER = 120000;
 const EVENT_BUFFER_MAX = 200;
 const REQUEST_TIMEOUT = 30000;
-const CONNECT_TIMEOUT = 10000;
-const GATEWAY_RETRY_COUNT = 3;
-const GATEWAY_RETRY_DELAY = 1000;
-const PAIRING_RETRY_INTERVAL = 5000;
+const CONNECT_TIMEOUT = 15000;
+const GW_RECONNECT_BASE = 3000;
+const GW_RECONNECT_MAX = 30000;
 
-// ==================== 会话管理 ====================
-const sessions = new Map();
+// ==================== 共享 Gateway 连接 ====================
+const gw = {
+  ws: null,
+  state: 'disconnected',       // disconnected | connecting | connected | pairing_pending
+  hello: null,
+  snapshot: null,
+  defaultSessionKey: null,
+  pendingRequests: new Map(),   // reqId → { sid, resolve, reject, timer }
+  _heartbeat: null,
+  _connectTimer: null,
+  _reconnectTimer: null,
+  _reconnectAttempts: 0,
+  _connectPromise: null,
+  _connectResolve: null,
+  _connectReject: null,
+};
 
-/**
- * 生成 connect 握手帧（含 Ed25519 device 签名）
- */
+// ==================== 用户会话 ====================
+const sessions = new Map();     // sid → session
+
+// ==================== Gateway 握手帧 ====================
+
 function createConnectFrame(nonce) {
   const signedAt = Date.now();
-  const credential = CONFIG.gatewayPassword || CONFIG.gatewayToken;
+  const credential = CONFIG.gatewayPassword || CONFIG.gatewayToken || deviceKey.deviceToken || '';
   const payload = [
     'v2', deviceKey.deviceId, 'gateway-client', 'backend', 'operator',
     SCOPES.join(','), String(signedAt), credential, nonce || '',
   ].join('|');
-  const signature = ed25519Sign(null, Buffer.from(payload, 'utf8'), devicePrivateKey).toString('base64url');
-  const auth = CONFIG.gatewayPassword
-    ? { password: CONFIG.gatewayPassword }
-    : { token: CONFIG.gatewayToken };
+  const signature = ed25519Sign(null, Buffer.from(payload, 'utf8'), devicePrivateKey).toString('base64');
+
+  let auth;
+  if (CONFIG.gatewayPassword) auth = { password: CONFIG.gatewayPassword };
+  else if (CONFIG.gatewayToken) auth = { token: CONFIG.gatewayToken };
+  else if (deviceKey.deviceToken) auth = { deviceToken: deviceKey.deviceToken };
+
   return {
     type: 'req',
     id: `connect-${randomUUID()}`,
@@ -130,6 +184,8 @@ function createConnectFrame(nonce) {
       role: 'operator',
       scopes: SCOPES,
       caps: [],
+      commands: [],
+      permissions: {},
       auth,
       device: {
         id: deviceKey.deviceId,
@@ -142,265 +198,347 @@ function createConnectFrame(nonce) {
   };
 }
 
-/** 验证客户端 token */
-function validateToken(token) {
-  if (!CONFIG.proxyToken) return true;
-  return token === CONFIG.proxyToken;
-}
+// ==================== SSE 工具 ====================
 
-/** 向 SSE 客户端推送事件 */
 function sseWrite(session, event, data) {
   session.eventSeq++;
   const entry = { id: session.eventSeq, event, data };
   session.eventBuffer.push(entry);
-  if (session.eventBuffer.length > EVENT_BUFFER_MAX) {
-    session.eventBuffer.shift();
-  }
+  if (session.eventBuffer.length > EVENT_BUFFER_MAX) session.eventBuffer.shift();
   if (session.sseRes && !session.sseRes.writableEnded) {
     session.sseRes.write(`id: ${entry.id}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     if (typeof session.sseRes.flush === 'function') session.sseRes.flush();
   }
 }
 
-/** 开始配对重试 */
-function startPairingRetry(sid) {
-  const session = sessions.get(sid);
-  if (!session) return;
-  stopPairingRetry(sid);
-  log.info(`开始配对轮询 [${sid}]，每 ${PAIRING_RETRY_INTERVAL / 1000}s 重试一次`);
-  session._pairingRetryTimer = setInterval(() => {
-    const s = sessions.get(sid);
-    if (!s || s.state !== 'pairing_pending') {
-      stopPairingRetry(sid);
-      return;
-    }
-    if (s.upstream?.readyState === WebSocket.OPEN) {
-      log.info(`配对重试 connect [${sid}]`);
-      s.upstream.send(JSON.stringify(createConnectFrame('')));
-    } else {
-      log.warn(`配对重试时 WS 已断开 [${sid}]`);
-      stopPairingRetry(sid);
-      sseWrite(s, 'proxy.error', { message: 'Gateway 连接已断开，配对中止' });
-      cleanupSession(sid);
-    }
-  }, PAIRING_RETRY_INTERVAL);
-}
-
-/** 停止配对重试 */
-function stopPairingRetry(sid) {
-  const session = sessions.get(sid);
-  if (!session) return;
-  if (session._pairingRetryTimer) {
-    clearInterval(session._pairingRetryTimer);
-    session._pairingRetryTimer = null;
+function broadcastSSE(event, data) {
+  for (const [, session] of sessions) {
+    sseWrite(session, event, data);
   }
 }
 
-/** 清理会话 */
+// ==================== 认证 ====================
+
+function validateToken(token) {
+  if (MULTI_USER) {
+    for (const [userId, userToken] of USERS) {
+      if (token === userToken) return { valid: true, userId };
+    }
+    return { valid: false, userId: null };
+  }
+  if (!CONFIG.proxyToken) return { valid: true, userId: null };
+  if (token === CONFIG.proxyToken) return { valid: true, userId: null };
+  return { valid: false, userId: null };
+}
+
+// ==================== 会话管理 ====================
+
 function cleanupSession(sid) {
   const session = sessions.get(sid);
   if (!session) return;
-  log.info(`清理会话: ${sid}`);
-  if (session._heartbeat) clearInterval(session._heartbeat);
+  log.info(`清理会话 [${sid}] userId=${session.userId || 'default'}`);
   if (session._sseHeartbeat) clearInterval(session._sseHeartbeat);
-  if (session._connectTimer) clearTimeout(session._connectTimer);
   if (session._lingerTimer) clearTimeout(session._lingerTimer);
-  if (session._pairingRetryTimer) clearInterval(session._pairingRetryTimer);
-  if (session.sseRes && !session.sseRes.writableEnded) {
-    session.sseRes.end();
-  }
-  if (session.upstream && session.upstream.readyState !== WebSocket.CLOSED) {
-    session.upstream.close();
-  }
-  for (const [, cb] of session.pendingRequests) {
-    clearTimeout(cb.timer);
-    cb.reject(new Error('会话已关闭'));
-  }
-  session.pendingRequests.clear();
+  if (session.sseRes && !session.sseRes.writableEnded) session.sseRes.end();
   sessions.delete(sid);
 }
 
-/**
- * 处理上游消息（Gateway → 代理服务端）
- */
-function handleUpstreamMessage(sid, rawData) {
-  const session = sessions.get(sid);
-  if (!session) return;
+/** 为用户生成隔离的 sessionKey */
+function getUserSessionKey(userId) {
+  const base = gw.defaultSessionKey || 'agent:main:main';
+  if (!userId || !MULTI_USER) return base;
+  // agent:agentId:channel → agent:agentId:user-{userId}
+  const parts = base.split(':');
+  if (parts.length >= 3) {
+    return `${parts[0]}:${parts[1]}:user-${userId}`;
+  }
+  return `agent:main:user-${userId}`;
+}
 
+// ==================== 共享 Gateway 消息处理 ====================
+
+function handleGatewayMessage(rawData) {
   const str = typeof rawData === 'string' ? rawData : rawData.toString();
-  session.lastActivity = Date.now();
+  let msg;
+  try { msg = JSON.parse(str); } catch { return; }
 
-  // 已连接状态：解析后推送 SSE
-  if (session.state === 'connected') {
-    let msg;
-    try { msg = JSON.parse(str); } catch { return; }
+  log.debug(`GW ← type=${msg.type} event=${msg.event} id=${msg.id} state=${gw.state}`);
 
-    // RPC 响应 → 匹配 pendingRequests
-    if (msg.type === 'res') {
-      const cb = session.pendingRequests.get(msg.id);
-      log.debug(`RPC 响应 [${sid}] id=${msg.id} ok=${msg.ok} matched=${!!cb}`);
-      if (cb) {
-        session.pendingRequests.delete(msg.id);
-        clearTimeout(cb.timer);
-        if (msg.ok) cb.resolve(msg.payload);
-        else cb.reject(new Error(msg.error?.message || msg.error?.code || '请求失败'));
-      }
-      return;
-    }
-
-    // 事件 → 推送 SSE
-    if (msg.type === 'event') {
-      log.debug(`SSE 推送 [${sid}] event=${msg.event} stream=${msg.payload?.stream} state=${msg.payload?.state}`);
-      sseWrite(session, 'message', msg);
+  // ── 1. connect.challenge ──────────────────────────────────
+  if (msg.type === 'event' && msg.event === 'connect.challenge') {
+    log.info(`收到 connect.challenge, nonce: ${msg.payload?.nonce}`);
+    if (gw._connectTimer) { clearTimeout(gw._connectTimer); gw._connectTimer = null; }
+    const nonce = msg.payload?.nonce || '';
+    if (gw.ws?.readyState === WebSocket.OPEN) {
+      gw.ws.send(JSON.stringify(createConnectFrame(nonce)));
     }
     return;
   }
 
-  // 握手阶段
-  let message;
-  try { message = JSON.parse(str); } catch { return; }
-
-  log.debug(`上游消息 [${sid}] type=${message.type} event=${message.event}`);
-
-  // connect.challenge
-  if (message.type === 'event' && message.event === 'connect.challenge') {
-    log.info(`收到 connect.challenge [${sid}]`);
-    if (session._connectTimer) { clearTimeout(session._connectTimer); session._connectTimer = null; }
-    const nonce = message.payload?.nonce || '';
-    const connectFrame = createConnectFrame(nonce);
-    if (session.upstream?.readyState === WebSocket.OPEN) {
-      session.upstream.send(JSON.stringify(connectFrame));
-    }
-    return;
-  }
-
-  // connect 响应
-  if (message.type === 'res' && message.id?.startsWith('connect-')) {
-    if (!message.ok || message.error) {
-      const errMsg = message.error?.message || message.error?.code || '';
-
-      // ===== 处理配对请求 =====
-      if (/pairing/i.test(errMsg)) {
-        if (session.state === 'pairing_pending') {
-          // 仍在等待配对，忽略（定时器会继续重试）
-          log.debug(`仍在等待配对 [${sid}]`);
-          return;
-        }
-        // 首次收到 pairing required
-        log.info(`设备需要配对 [${sid}], deviceId: ${deviceKey.deviceId}`);
-        session.state = 'pairing_pending';
-        session._connectResolve?.({ state: 'pairing_pending', deviceId: deviceKey.deviceId });
-        startPairingRetry(sid);
-        return;
-      }
-
-      // ===== 配对期间收到其他错误 =====
-      if (session.state === 'pairing_pending') {
-        log.warn(`配对期间收到错误 [${sid}]: ${errMsg}`);
-        // 不中断配对，继续重试
-        return;
-      }
-
-      log.error(`Gateway 握手失败 [${sid}]:`, message.error || '未知错误');
-      session._connectReject?.(new Error(errMsg || 'Gateway 握手失败'));
-    } else {
-      // ===== 配对成功 =====
-      if (session.state === 'pairing_pending') {
-        log.info(`设备配对成功！[${sid}]`);
-        stopPairingRetry(sid);
-        session.state = 'connected';
-        session.hello = message.payload;
-        session.snapshot = message.payload?.snapshot || null;
-
-        const defaults = session.snapshot?.sessionDefaults;
-        const sessionKey = defaults?.mainSessionKey || `agent:${defaults?.defaultAgentId || 'main'}:main`;
-
-        // 通过 SSE 通知客户端配对成功
-        sseWrite(session, 'proxy.paired', {
+  // ── 2. 配对事件推送（pairing_pending 阶段）────────────────
+  if (msg.type === 'event' && gw.state === 'pairing_pending') {
+    switch (msg.event) {
+      case 'node.pair.approved': {
+        log.info('✅ 设备配对已批准');
+        gw.state = 'connected';
+        const dt = msg.payload?.deviceToken || msg.payload?.token;
+        if (dt) saveDeviceToken(dt);
+        gw.hello = msg.payload;
+        broadcastSSE('proxy.paired', {
           message: '设备配对成功',
-          snapshot: session.snapshot,
-          hello: session.hello,
-          sessionKey,
+          snapshot: msg.payload?.snapshot || null,
         });
+        gw._connectResolve?.('connected');
+        gw._connectResolve = null;
+        gw._connectReject = null;
+        return;
+      }
+      case 'node.pair.rejected':
+        log.error('❌ 设备配对被拒绝');
+        broadcastSSE('proxy.error', { message: '设备配对被拒绝' });
+        gw._connectReject?.(new Error('设备配对被拒绝'));
+        gw._connectResolve = null;
+        gw._connectReject = null;
+        return;
+      case 'node.pair.expired':
+        log.error('⌛ 配对请求已过期（5分钟超时）');
+        broadcastSSE('proxy.error', { message: '配对请求已过期（5分钟超时），请重新连接' });
+        gw._connectReject?.(new Error('配对请求已过期'));
+        gw._connectResolve = null;
+        gw._connectReject = null;
+        return;
+      default:
+        log.debug(`配对阶段忽略事件: ${msg.event}`);
+        return;
+    }
+  }
+
+  // ── 3. connect 响应 ───────────────────────────────────────
+  if (msg.type === 'res' && msg.id?.startsWith('connect-')) {
+    if (!msg.ok || msg.error) {
+      const errMsg = msg.error?.message || msg.error?.code || '';
+      if (gw.state === 'pairing_pending') {
+        log.warn(`配对期间收到错误: ${errMsg}`);
+        return;
+      }
+      log.error('Gateway 握手失败:', msg.error || '未知错误');
+      gw._connectReject?.(new Error(errMsg || 'Gateway 握手失败'));
+      gw._connectResolve = null;
+      gw._connectReject = null;
+    } else {
+      const resultType = msg.payload?.type;
+
+      // pair-pending
+      if (resultType === 'pair-pending' || msg.payload?.status === 'pending') {
+        const rid = msg.payload?.requestId || msg.payload?.pairRequestId || '';
+        log.info(`⏳ 设备需要配对, deviceId: ${deviceKey.deviceId}, requestId: ${rid}`);
+        gw.state = 'pairing_pending';
+        broadcastSSE('proxy.pairing_pending', {
+          message: '请前往 OpenClaw Web 控制台的 Nodes → Devices 页面批准此设备',
+          deviceId: deviceKey.deviceId,
+          requestId: rid,
+        });
+        gw._connectResolve?.('pairing_pending');
+        gw._connectResolve = null;
+        gw._connectReject = null;
         return;
       }
 
-      // ===== 正常握手成功 =====
-      log.info(`Gateway 握手成功 [${sid}]`);
-      session.state = 'connected';
-      session.hello = message.payload;
-      session.snapshot = message.payload?.snapshot || null;
-      // 发送缓存消息
-      for (const msg of session._pendingMessages) {
-        if (session.upstream?.readyState === WebSocket.OPEN) session.upstream.send(msg);
-      }
-      session._pendingMessages = [];
-      session._connectResolve?.();
+      // hello-ok
+      log.info(`Gateway 握手成功, type=${resultType}`);
+      gw.state = 'connected';
+      gw.hello = msg.payload;
+      gw.snapshot = msg.payload?.snapshot || null;
+      const defaults = gw.snapshot?.sessionDefaults;
+      gw.defaultSessionKey = defaults?.mainSessionKey || `agent:${defaults?.defaultAgentId || 'main'}:main`;
+      if (msg.payload?.auth?.deviceToken) saveDeviceToken(msg.payload.auth.deviceToken);
+      gw._connectResolve?.('connected');
+      gw._connectResolve = null;
+      gw._connectReject = null;
     }
     return;
+  }
+
+  // ── 4. RPC 响应 → 匹配到发起请求的会话 ────────────────────
+  if (msg.type === 'res') {
+    const pending = gw.pendingRequests.get(msg.id);
+    if (pending) {
+      gw.pendingRequests.delete(msg.id);
+      clearTimeout(pending.timer);
+      log.debug(`RPC 响应: id=${msg.id} ok=${msg.ok}`);
+      if (msg.ok) pending.resolve(msg.payload);
+      else pending.reject(new Error(msg.error?.message || msg.error?.code || '请求失败'));
+    }
+    return;
+  }
+
+  // ── 5. 事件 → 按 sessionKey 路由到对应用户 ────────────────
+  if (msg.type === 'event') {
+    const eventSessionKey = msg.payload?.sessionKey;
+    if (eventSessionKey) {
+      for (const [, session] of sessions) {
+        if (session.sessionKeys.has(eventSessionKey)) {
+          sseWrite(session, 'message', msg);
+        }
+      }
+    } else {
+      // 无 sessionKey 的系统事件，广播给所有用户
+      for (const [, session] of sessions) {
+        sseWrite(session, 'message', msg);
+      }
+    }
   }
 }
 
-/**
- * 建立到 Gateway 的上游 WS 连接
- */
-function connectToGateway(sid) {
-  const session = sessions.get(sid);
-  if (!session) return Promise.reject(new Error('会话不存在'));
+// ==================== Gateway 连接管理 ====================
 
-  return new Promise((resolve, reject) => {
-    session._connectResolve = (result) => resolve(result || { state: 'connected' });
-    session._connectReject = reject;
+/** 建立共享 Gateway WebSocket 连接 */
+function connectGateway() {
+  if (gw._connectPromise) return gw._connectPromise;
+  if (gw.state === 'connected') return Promise.resolve('connected');
+  if (gw.state === 'pairing_pending') return Promise.resolve('pairing_pending');
 
-    log.info(`连接到 Gateway: ${CONFIG.gatewayUrl} [${sid}]`);
-    const upstream = new WebSocket(CONFIG.gatewayUrl, {
+  gw._connectPromise = new Promise((resolve, reject) => {
+    gw._connectResolve = (result) => {
+      clearTimeout(timeout);
+      gw._connectPromise = null;
+      gw._reconnectAttempts = 0;
+      resolve(result);
+    };
+    gw._connectReject = (err) => {
+      clearTimeout(timeout);
+      gw._connectPromise = null;
+      reject(err);
+    };
+
+    log.info(`连接到 Gateway: ${CONFIG.gatewayUrl}`);
+    const ws = new WebSocket(CONFIG.gatewayUrl, {
       headers: { 'Origin': CONFIG.gatewayUrl.replace('ws://', 'http://').replace('wss://', 'https://') },
     });
-    session.upstream = upstream;
-    session.state = 'connecting';
+    gw.ws = ws;
+    gw.state = 'connecting';
 
-    upstream.on('open', () => {
-      log.info(`上游连接已建立 [${sid}]`);
-      // 等 500ms 看是否收到 challenge
-      session._connectTimer = setTimeout(() => {
-        if (session.state === 'connecting') {
-          log.info(`未收到 challenge，直接发送 connect [${sid}]`);
-          upstream.send(JSON.stringify(createConnectFrame('')));
+    // 整体超时
+    const timeout = setTimeout(() => {
+      if (gw.state === 'connecting') {
+        log.error('Gateway 连接超时');
+        gw._connectResolve = null;
+        gw._connectReject = null;
+        gw._connectPromise = null;
+        gw.state = 'disconnected';
+        try { ws.close(); } catch { /* ignore */ }
+        reject(new Error('连接超时'));
+      }
+    }, CONNECT_TIMEOUT);
+
+    ws.on('open', () => {
+      log.info('Gateway WebSocket 已建立');
+      // 等 500ms 看是否有 challenge
+      gw._connectTimer = setTimeout(() => {
+        if (gw.state === 'connecting') {
+          log.info('未收到 challenge，直接发送 connect');
+          ws.send(JSON.stringify(createConnectFrame('')));
         }
       }, 500);
     });
 
-    upstream.on('message', (data) => handleUpstreamMessage(sid, data.toString()));
+    ws.on('message', (data) => handleGatewayMessage(data.toString()));
 
-    upstream.on('close', (code, reason) => {
-      log.warn(`上游连接关闭 [${sid}] code=${code} state=${session.state}`);
-      if (session.state === 'pairing_pending') {
-        // 配对期间 WS 断开
-        log.warn(`配对期间 WS 断开 [${sid}]`);
-        stopPairingRetry(sid);
-        sseWrite(session, 'proxy.error', { message: 'Gateway 连接断开，配对中止' });
-        cleanupSession(sid);
-      } else if (session.state !== 'connected') {
-        reject(new Error(`Gateway 连接关闭: ${code}`));
+    ws.on('close', (code) => {
+      log.warn(`Gateway 连接关闭: code=${code}, state=${gw.state}`);
+      const wasConnected = gw.state === 'connected';
+      const wasPairing = gw.state === 'pairing_pending';
+
+      // 清理
+      gw.ws = null;
+      gw.state = 'disconnected';
+      if (gw._heartbeat) { clearInterval(gw._heartbeat); gw._heartbeat = null; }
+      if (gw._connectTimer) { clearTimeout(gw._connectTimer); gw._connectTimer = null; }
+
+      // 拒绝所有 pending RPC
+      for (const [id, pending] of gw.pendingRequests) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Gateway 连接已断开'));
+      }
+      gw.pendingRequests.clear();
+
+      if (wasPairing) {
+        broadcastSSE('proxy.error', { message: 'Gateway 连接断开，配对中止' });
+        gw._connectReject?.(new Error('Gateway 连接断开'));
+      } else if (wasConnected) {
+        broadcastSSE('proxy.disconnect', { message: 'Gateway 连接已断开', code });
+        scheduleGatewayReconnect();
       } else {
-        sseWrite(session, 'proxy.disconnect', { message: 'Gateway 连接已断开', code });
-        cleanupSession(sid);
+        gw._connectReject?.(new Error(`Gateway 连接关闭: ${code}`));
       }
+      gw._connectResolve = null;
+      gw._connectReject = null;
+      gw._connectPromise = null;
     });
 
-    upstream.on('error', (error) => {
-      log.error(`上游连接错误 [${sid}]:`, error.message);
-      if (session.state !== 'connected') {
-        reject(new Error(`Gateway 连接错误: ${error.message}`));
-      }
+    ws.on('error', (error) => {
+      log.error('Gateway 连接错误:', error.message);
     });
 
-    // 上游心跳
-    session._heartbeat = setInterval(() => {
-      if (upstream.readyState === WebSocket.OPEN) {
-        upstream.ping();
-      }
+    // 心跳
+    gw._heartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.ping();
     }, 30000);
+  });
+
+  return gw._connectPromise;
+}
+
+/** 自动重连（仅在有活跃会话时） */
+function scheduleGatewayReconnect() {
+  if (gw._reconnectTimer) return;
+  if (sessions.size === 0) {
+    log.info('无活跃会话，跳过 Gateway 重连');
+    return;
+  }
+  const delay = Math.min(GW_RECONNECT_BASE * Math.pow(2, gw._reconnectAttempts), GW_RECONNECT_MAX);
+  gw._reconnectAttempts++;
+  log.info(`Gateway 将在 ${delay}ms 后重连（第 ${gw._reconnectAttempts} 次）`);
+
+  gw._reconnectTimer = setTimeout(async () => {
+    gw._reconnectTimer = null;
+    try {
+      const result = await connectGateway();
+      if (result === 'connected') {
+        log.info('Gateway 重连成功');
+        broadcastSSE('proxy.reconnected', { message: 'Gateway 已重新连接' });
+      }
+    } catch (e) {
+      log.error('Gateway 重连失败:', e.message);
+      scheduleGatewayReconnect();
+    }
+  }, delay);
+}
+
+/** 确保 Gateway 已连接 */
+async function ensureGatewayConnected() {
+  if (gw.state === 'connected') return 'connected';
+  if (gw.state === 'pairing_pending') return 'pairing_pending';
+  if (gw._connectPromise) return gw._connectPromise;
+  return connectGateway();
+}
+
+/** 在共享连接上发送 RPC */
+function sendGatewayRPC(sid, method, params) {
+  return new Promise((resolve, reject) => {
+    if (gw.state !== 'connected' || !gw.ws || gw.ws.readyState !== WebSocket.OPEN) {
+      return reject(new Error('Gateway 未连接'));
+    }
+    const reqId = `rpc-${randomUUID()}`;
+    const timer = setTimeout(() => {
+      gw.pendingRequests.delete(reqId);
+      reject(new Error('请求超时'));
+    }, REQUEST_TIMEOUT);
+
+    gw.pendingRequests.set(reqId, { sid, resolve, reject, timer });
+    const frame = { type: 'req', id: reqId, method, params };
+    log.debug(`RPC → [${sid?.slice(0, 8)}] ${method} id=${reqId}`);
+    gw.ws.send(JSON.stringify(frame));
   });
 }
 
@@ -424,7 +562,6 @@ app.use((req, res, next) => {
   if (origin && (allowedOrigins.includes(origin) || origin.startsWith('capacitor://') || origin.startsWith('ionic://'))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (!origin) {
-    // 无 Origin 时（如 Capacitor 原生请求）允许
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -440,27 +577,29 @@ app.get('/health', (req, res) => {
     status: 'ok',
     timestamp: new Date().toISOString(),
     sessions: sessions.size,
+    gateway: { state: gw.state, hasDeviceToken: !!deviceKey.deviceToken },
     config: {
       port: CONFIG.port,
       gatewayUrl: CONFIG.gatewayUrl,
       hasProxyToken: !!CONFIG.proxyToken,
       hasGatewayToken: !!CONFIG.gatewayToken,
+      multiUser: MULTI_USER,
+      userCount: USERS.size,
     },
   });
 });
 
 // ==================== API 路由 ====================
 
-/** POST /api/connect — 建立会话 */
+/** POST /api/connect — 建立用户会话 */
 app.post('/api/connect', async (req, res) => {
   const { token } = req.body || {};
-  if (!validateToken(token)) {
+  const auth = validateToken(token);
+  if (!auth.valid) {
     return res.status(401).json({ ok: false, error: '认证失败：无效的连接密码' });
   }
 
-  // 前置检查：Gateway 认证信息是否配置
-  if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword) {
-    log.error('Gateway 认证未配置，拒绝连接请求');
+  if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword && !deviceKey.deviceToken) {
     return res.status(502).json({
       ok: false,
       error: 'Gateway 认证未配置：请在服务器的 server/.env 中设置 OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_GATEWAY_PASSWORD',
@@ -468,80 +607,35 @@ app.post('/api/connect', async (req, res) => {
   }
 
   const sid = randomUUID();
-  const session = {
-    token,
-    upstream: null,
-    state: 'init',
-    sseRes: null,
-    eventBuffer: [],
-    eventSeq: 0,
-    pendingRequests: new Map(),
-    snapshot: null,
-    hello: null,
-    lastActivity: Date.now(),
-    _pendingMessages: [],
-    _connectTimer: null,
-    _connectResolve: null,
-    _connectReject: null,
-    _heartbeat: null,
-    _lingerTimer: null,
-    _sseHeartbeat: null,
-    _pairingRetryTimer: null,
-  };
-  sessions.set(sid, session);
+  const userId = auth.userId;
 
   try {
-    let lastError;
-    for (let attempt = 1; attempt <= GATEWAY_RETRY_COUNT; attempt++) {
-      try {
-        const timeout = setTimeout(() => {
-          session._connectReject?.(new Error('连接超时'));
-        }, CONNECT_TIMEOUT);
+    const gwState = await ensureGatewayConnected();
+    const sessionKey = getUserSessionKey(userId);
 
-        await connectToGateway(sid);
-        clearTimeout(timeout);
-        lastError = null;
-        break;
-      } catch (e) {
-        lastError = e;
-        if (session._heartbeat) { clearInterval(session._heartbeat); session._heartbeat = null; }
-        if (session._connectTimer) { clearTimeout(session._connectTimer); session._connectTimer = null; }
-        if (session.upstream && session.upstream.readyState !== WebSocket.CLOSED) {
-          session.upstream.close();
-        }
-        session.upstream = null;
-        session.state = 'init';
-        session.pendingRequests.clear();
+    const session = {
+      userId,
+      token,
+      sseRes: null,
+      eventBuffer: [],
+      eventSeq: 0,
+      lastActivity: Date.now(),
+      sessionKeys: new Set([sessionKey]),
+      _sseHeartbeat: null,
+      _lingerTimer: null,
+    };
+    sessions.set(sid, session);
 
-        if (attempt < GATEWAY_RETRY_COUNT) {
-          log.warn(`Gateway 连接失败 [${sid}] 第${attempt}次，${GATEWAY_RETRY_DELAY}ms 后重试: ${e.message}`);
-          await new Promise(r => setTimeout(r, GATEWAY_RETRY_DELAY));
-        }
-      }
+    if (gwState === 'pairing_pending') {
+      log.info(`会话建立（等待配对）[${sid}] userId=${userId || 'default'}`);
+      return res.json({ ok: true, sid, state: 'pairing_pending', deviceId: deviceKey.deviceId });
     }
 
-    if (lastError) throw lastError;
-
-    // ===== 配对待批准：返回 pairing_pending 状态 =====
-    if (session.state === 'pairing_pending') {
-      log.info(`会话建立成功（等待配对）[${sid}], deviceId: ${deviceKey.deviceId}`);
-      return res.json({
-        ok: true,
-        sid,
-        state: 'pairing_pending',
-        deviceId: deviceKey.deviceId,
-      });
-    }
-
-    // ===== 正常连接成功 =====
-    const defaults = session.snapshot?.sessionDefaults;
-    const sessionKey = defaults?.mainSessionKey || `agent:${defaults?.defaultAgentId || 'main'}:main`;
-
-    log.info(`会话建立成功 [${sid}]`);
-    res.json({ ok: true, sid, snapshot: session.snapshot, hello: session.hello, sessionKey });
+    log.info(`会话建立成功 [${sid}] userId=${userId || 'default'} sessionKey=${sessionKey}`);
+    res.json({ ok: true, sid, snapshot: gw.snapshot, hello: gw.hello, sessionKey });
   } catch (e) {
     log.error(`会话建立失败 [${sid}]:`, e.message);
-    cleanupSession(sid);
+    sessions.delete(sid);
 
     let userError = e.message;
     let statusCode = 502;
@@ -553,7 +647,6 @@ app.post('/api/connect', async (req, res) => {
       userError = '连接超时，请检查 OpenClaw 是否正在运行';
     } else if (/unauthorized|token missing|auth.*token|握手失败/i.test(userError)) {
       userError = 'Gateway 认证失败：请在服务器的 server/.env 中配置 OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_GATEWAY_PASSWORD';
-      statusCode = 502;
     }
     res.status(statusCode).json({ ok: false, error: userError });
   }
@@ -563,9 +656,7 @@ app.post('/api/connect', async (req, res) => {
 app.get('/api/events', (req, res) => {
   const sid = req.query.sid;
   const session = sessions.get(sid);
-  if (!session) {
-    return res.status(404).json({ ok: false, error: '会话不存在' });
-  }
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -575,27 +666,16 @@ app.get('/api/events', (req, res) => {
     'Content-Encoding': 'none',
   });
   res.flushHeaders();
-
   if (req.socket) req.socket.setNoDelay(true);
-
-  // 填充注释，触发代理/CDN 刷新缓冲区
   res.write(`: padding ${' '.repeat(2048)}\n\n`);
 
-  // 关闭旧 SSE 连接
-  if (session.sseRes && !session.sseRes.writableEnded) {
-    session.sseRes.end();
-  }
-  if (session._sseHeartbeat) {
-    clearInterval(session._sseHeartbeat);
-  }
+  // 关闭旧 SSE
+  if (session.sseRes && !session.sseRes.writableEnded) session.sseRes.end();
+  if (session._sseHeartbeat) clearInterval(session._sseHeartbeat);
 
   session.sseRes = res;
   session.lastActivity = Date.now();
-
-  if (session._lingerTimer) {
-    clearTimeout(session._lingerTimer);
-    session._lingerTimer = null;
-  }
+  if (session._lingerTimer) { clearTimeout(session._lingerTimer); session._lingerTimer = null; }
 
   // 断线续传
   const lastId = parseInt(req.headers['last-event-id'], 10);
@@ -608,11 +688,11 @@ app.get('/api/events', (req, res) => {
     log.info(`SSE 续传 [${sid}] 补发 ${missed.length} 条事件`);
   }
 
-  // 发送就绪确认
-  res.write(`event: proxy.ready\ndata: ${JSON.stringify({ sid, state: session.state })}\n\n`);
+  // 就绪确认
+  res.write(`event: proxy.ready\ndata: ${JSON.stringify({ sid, state: gw.state })}\n\n`);
   if (typeof res.flush === 'function') res.flush();
 
-  // SSE 心跳
+  // 心跳
   session._sseHeartbeat = setInterval(() => {
     if (!res.writableEnded) {
       res.write(': heartbeat\n\n');
@@ -621,13 +701,9 @@ app.get('/api/events', (req, res) => {
   }, SSE_HEARTBEAT_INTERVAL);
 
   res.on('close', () => {
-    log.info(`SSE 连接关闭 [${sid}]`);
-    if (session._sseHeartbeat) {
-      clearInterval(session._sseHeartbeat);
-      session._sseHeartbeat = null;
-    }
+    log.info(`SSE 关闭 [${sid}]`);
+    if (session._sseHeartbeat) { clearInterval(session._sseHeartbeat); session._sseHeartbeat = null; }
     session.sseRes = null;
-
     session._lingerTimer = setTimeout(() => {
       const s = sessions.get(sid);
       if (s && !s.sseRes) {
@@ -638,85 +714,58 @@ app.get('/api/events', (req, res) => {
   });
 });
 
-/** POST /api/send — 发送请求（RPC 转发） */
+/** POST /api/send — RPC 转发 */
 app.post('/api/send', async (req, res) => {
   const { sid, method, params } = req.body || {};
   const session = sessions.get(sid);
-  if (!session) {
-    return res.status(404).json({ ok: false, error: '会话不存在' });
-  }
-  if (session.state !== 'connected') {
-    return res.status(400).json({ ok: false, error: '会话未就绪' });
-  }
-  if (!session.upstream || session.upstream.readyState !== WebSocket.OPEN) {
-    return res.status(502).json({ ok: false, error: 'Gateway 连接已断开' });
-  }
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+  if (gw.state !== 'connected') return res.status(400).json({ ok: false, error: 'Gateway 未就绪' });
 
   session.lastActivity = Date.now();
-  const reqId = `rpc-${randomUUID()}`;
 
-  log.info(`RPC 请求 [${sid}] id=${reqId} method=${method}`);
-  const frame = { type: 'req', id: reqId, method, params };
+  // 自动订阅请求中涉及的 sessionKey（用于事件路由）
+  if (params?.sessionKey) session.sessionKeys.add(params.sessionKey);
 
   try {
-    const result = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        session.pendingRequests.delete(reqId);
-        reject(new Error('请求超时'));
-      }, REQUEST_TIMEOUT);
-
-      session.pendingRequests.set(reqId, { resolve, reject, timer });
-      session.upstream.send(JSON.stringify(frame));
-    });
-
+    const result = await sendGatewayRPC(sid, method, params);
     res.json({ ok: true, payload: result });
   } catch (e) {
+    if (/Gateway 未连接/.test(e.message)) {
+      return res.status(502).json({ ok: false, error: 'Gateway 连接已断开' });
+    }
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-/** POST /api/disconnect — 断开会话 */
+/** POST /api/disconnect */
 app.post('/api/disconnect', (req, res) => {
   const { sid } = req.body || {};
-  const session = sessions.get(sid);
-  if (!session) {
-    return res.json({ ok: true });
-  }
-  cleanupSession(sid);
+  if (sessions.has(sid)) cleanupSession(sid);
   res.json({ ok: true });
 });
 
-/** GET /api/progress — 查询会话执行状态 */
+/** GET /api/progress */
 app.get('/api/progress', (req, res) => {
   const sid = String(req.query.sid || '');
-  if (sid) {
-    const session = sessions.get(sid);
-    if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
-    return res.json({
-      ok: true,
-      sid,
-      busy: false,
-      state: 'idle',
-      updatedAt: Date.now(),
-    });
-  }
-  return res.status(400).json({ ok: false, error: '缺少 sid' });
+  if (!sid) return res.status(400).json({ ok: false, error: '缺少 sid' });
+  if (!sessions.has(sid)) return res.status(404).json({ ok: false, error: '会话不存在' });
+  res.json({ ok: true, sid, busy: false, state: 'idle', updatedAt: Date.now() });
 });
 
-// ==================== 会话清理 ====================
+// ==================== 定期清理 ====================
 
 setInterval(() => {
   const now = Date.now();
   for (const [sid, session] of sessions) {
     if (session.sseRes && !session.sseRes.writableEnded) continue;
     if (now - session.lastActivity > SESSION_IDLE_TIMEOUT) {
-      log.info(`会话空闲超时，清理 [${sid}]`);
+      log.info(`会话空闲超时 [${sid}]`);
       cleanupSession(sid);
     }
   }
 }, SESSION_CLEANUP_INTERVAL);
 
-// ==================== 静态文件服务 ====================
+// ==================== 静态文件 ====================
 
 if (existsSync(CONFIG.distPath)) {
   app.use(express.static(CONFIG.distPath));
@@ -739,45 +788,71 @@ server.listen(CONFIG.port, () => {
   console.log(`║  端口:         ${String(CONFIG.port).padEnd(40)}║`);
   console.log(`║  绑定地址:     0.0.0.0（公网可访问）                  ║`);
   console.log(`║  Gateway 地址: ${CONFIG.gatewayUrl.padEnd(40)}║`);
-  if (CONFIG.proxyToken) {
+  if (MULTI_USER) {
+    console.log(`║  用户模式:     多用户（${USERS.size} 个用户，对话隔离）${' '.repeat(Math.max(0, 15 - String(USERS.size).length))}║`);
+    for (const [uid] of USERS) {
+      const line = `    - ${uid}`;
+      console.log(`║  ${line.padEnd(53)}║`);
+    }
+  } else if (CONFIG.proxyToken) {
     console.log(`║  连接 Token:   ${CONFIG.proxyToken.padEnd(40)}║`);
   } else {
     console.log('║  连接 Token:   (未设置, 任何人可连接)                ║');
   }
   if (CONFIG.gatewayToken || CONFIG.gatewayPassword) {
-    console.log(`║  Gateway 认证: ✅ 已配置                             ║`);
+    console.log('║  Gateway 认证: ✅ 已配置                             ║');
+  } else if (deviceKey.deviceToken) {
+    console.log('║  Gateway 认证: ✅ 使用已保存的 deviceToken            ║');
   } else {
     console.log('║  Gateway 认证: ❌ 未配置                             ║');
   }
   console.log(`║  设备 ID:      ${deviceKey.deviceId.slice(0, 32)}...   ║`);
+  if (deviceKey.deviceToken) {
+    console.log('║  Device Token: ✅ 已保存（免配对重连）                ║');
+  } else {
+    console.log('║  Device Token: ⏳ 未获取（首次需配对）                ║');
+  }
   console.log('╚════════════════════════════════════════════════════════╝');
   console.log('');
 
-  if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword) {
+  if (MULTI_USER) {
+    console.log(`ℹ️  多用户模式已启用，共 ${USERS.size} 个用户`);
+    console.log('   每个用户拥有独立的对话空间，共享同一个 Gateway 设备身份');
+    console.log('   Gateway 只需配对一次，所有用户即可使用');
     console.log('');
+  }
+
+  if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword && !deviceKey.deviceToken) {
     console.log('⚠️  警告: 未配置 Gateway 认证信息！');
-    console.log('   大多数 OpenClaw Gateway 需要认证才能连接。');
     console.log('   请编辑 server/.env 文件，设置以下其中一项：');
     console.log('     OPENCLAW_GATEWAY_TOKEN=你的Gateway-Token');
     console.log('     OPENCLAW_GATEWAY_PASSWORD=你的Gateway密码');
     console.log('');
-    console.log('   如何获取 Gateway Token:');
-    console.log('   - 打开 OpenClaw 客户端 → 设置 → Gateway → 复制 Token');
-    console.log('   - 或查看 OpenClaw 配置文件中的 auth.token 字段');
+  } else if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword && deviceKey.deviceToken) {
+    console.log('ℹ️  使用已保存的 deviceToken 进行 Gateway 认证');
+    console.log('   （如需切换 Gateway，请删除 server/.device-key.json 并重新配对）');
     console.log('');
   }
 
-  if (!CONFIG.proxyToken) {
+  if (!MULTI_USER && !CONFIG.proxyToken) {
     log.warn('未设置连接密码 (PROXY_TOKEN)，所有客户端连接将被允许');
   }
 });
 
-// 优雅关闭
+// ==================== 优雅关闭 ====================
+
 function shutdown() {
   log.info('正在关闭服务...');
-  for (const [sid] of sessions) {
-    cleanupSession(sid);
+  for (const [sid] of sessions) cleanupSession(sid);
+  if (gw._heartbeat) clearInterval(gw._heartbeat);
+  if (gw._reconnectTimer) clearTimeout(gw._reconnectTimer);
+  if (gw._connectTimer) clearTimeout(gw._connectTimer);
+  if (gw.ws && gw.ws.readyState !== WebSocket.CLOSED) gw.ws.close();
+  for (const [, pending] of gw.pendingRequests) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error('服务关闭'));
   }
+  gw.pendingRequests.clear();
   server.close(() => {
     log.info('服务已关闭');
     process.exit(0);
