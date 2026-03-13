@@ -25,6 +25,14 @@ export default function LoginPage() {
       return '';
     }
   });
+  const [username, setUsername] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('clawchat-config') || '{}');
+      return saved.username || '';
+    } catch {
+      return '';
+    }
+  });
   const [showToken, setShowToken] = useState(false);
 
   const isConnecting = connectionStatus === 'connecting' || connectionStatus === 'reconnecting';
@@ -36,10 +44,11 @@ export default function LoginPage() {
     const config: ServerConfig = {
       host: host.trim().replace(/\/+$/, ''),
       token: token.trim(),
+      username: username.trim() || undefined,
     };
 
     connect(config);
-  }, [host, token, connect]);
+  }, [host, token, username, connect]);
 
   /** 停止重连 */
   const handleStopReconnect = useCallback(() => {
@@ -124,6 +133,23 @@ export default function LoginPage() {
           </div>
         </div>
 
+        {/* 用户名 */}
+        <div>
+          <label className="block text-sm text-neutral-400 mb-1.5">用户名 <span className="text-neutral-600 text-xs">(可选)</span></label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="输入你的昵称，区分不同用户"
+            disabled={isConnecting || isPairingPending}
+            className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
+            onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
+          />
+          <p className="text-xs text-neutral-600 mt-1">
+            多用户模式下用于标识身份，单用户可不填
+          </p>
+        </div>
+
         {/* 连接按钮 */}
         {isPairingPending ? null : isConnecting ? (
           <div className="space-y-2">
@@ -170,16 +196,26 @@ export default function LoginPage() {
               代理服务首次连接 OpenClaw Gateway 时需要配对批准。
               请前往 <strong>OpenClaw 控制台</strong> 的
               <strong> Nodes → Devices </strong>
-              页面批准此设备的连接。
+              页面，找到以下设备并批准连接。
             </p>
-            {apiClient.deviceId && (
-              <div className="bg-amber-500/5 border border-amber-500/10 rounded-lg px-3 py-2">
-                <p className="text-amber-400/60 text-xs mb-1">设备 ID:</p>
-                <p className="text-amber-300/90 text-xs font-mono break-all select-all">
-                  {apiClient.deviceId}
-                </p>
-              </div>
-            )}
+            <div className="space-y-2">
+              {apiClient.requestId && (
+                <div className="bg-amber-500/5 border border-amber-500/10 rounded-lg px-3 py-2">
+                  <p className="text-amber-400/60 text-xs mb-1">配对请求 ID:</p>
+                  <p className="text-amber-300/90 text-sm font-mono break-all select-all font-bold">
+                    {apiClient.requestId}
+                  </p>
+                </div>
+              )}
+              {apiClient.deviceId && (
+                <div className="bg-amber-500/5 border border-amber-500/10 rounded-lg px-3 py-2">
+                  <p className="text-amber-400/60 text-xs mb-1">设备 ID:</p>
+                  <p className="text-amber-300/90 text-xs font-mono break-all select-all">
+                    {apiClient.deviceId}
+                  </p>
+                </div>
+              )}
+            </div>
             <button
               onClick={handleStopReconnect}
               className="w-full mt-3 py-2 rounded-xl border border-amber-500/30 text-amber-400 hover:text-amber-200 hover:border-amber-500/50 text-xs transition-colors"

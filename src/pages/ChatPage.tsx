@@ -18,6 +18,7 @@ export default function ChatPage() {
     currentAiMessageId,
     toolCards,
     connectionStatus,
+    username,
     sendMessage,
     stopGenerating,
     switchSession,
@@ -86,6 +87,7 @@ export default function ChatPage() {
         <SessionList
           sessions={sessions}
           currentSessionKey={currentSessionKey}
+          username={username}
           onSelectSession={(key) => {
             switchSession(key);
             setShowSidebar(false);
@@ -93,6 +95,7 @@ export default function ChatPage() {
           onDeleteSession={deleteSession}
           onRefresh={loadSessions}
           onClose={() => setShowSidebar(false)}
+          onDisconnect={disconnect}
         />
       </div>
 
@@ -127,7 +130,7 @@ export default function ChatPage() {
               />
               <span className="text-xs text-neutral-500">
                 {connectionStatus === 'ready' || connectionStatus === 'connected'
-                  ? '已连接'
+                  ? (username ? `${username} · 已连接` : '已连接')
                   : connectionStatus === 'connecting' || connectionStatus === 'reconnecting'
                   ? '连接中...'
                   : '未连接'}

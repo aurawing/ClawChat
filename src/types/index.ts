@@ -3,6 +3,7 @@
 export interface ServerConfig {
   host: string; // 服务器地址 (如 192.168.1.100:3210)
   token: string; // 连接密码
+  username?: string; // 用户名（多用户模式下用于标识身份）
 }
 
 // ===== 连接状态 =====

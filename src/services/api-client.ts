@@ -40,6 +40,7 @@ type ReadyHandler = (
 export class ApiClient {
   private _host = '';
   private _token = '';
+  private _username = '';
   private _baseUrl = '';
   private _sid: string | null = null;
   private _es: EventSource | null = null;
@@ -47,6 +48,8 @@ export class ApiClient {
   private _gatewayReady = false;
   private _pairingPending = false;
   private _deviceId: string | null = null;
+  private _requestId: string | null = null;
+  private _userId: string | null = null;
   private _intentionalClose = false;
   private _onStatusChange: StatusChangeHandler | null = null;
   private _snapshot: Record<string, unknown> | null = null;
@@ -71,6 +74,15 @@ export class ApiClient {
   }
   get deviceId(): string | null {
     return this._deviceId;
+  }
+  get requestId(): string | null {
+    return this._requestId;
+  }
+  get userId(): string | null {
+    return this._userId;
+  }
+  get username(): string {
+    return this._username;
   }
   get snapshot(): Record<string, unknown> | null {
     return this._snapshot;
@@ -104,19 +116,22 @@ export class ApiClient {
   }
 
   /** 连接到代理服务端 */
-  async connect(host: string, token: string): Promise<void> {
+  async connect(host: string, token: string, username?: string): Promise<void> {
     this._host = host;
     this._token = token;
+    this._username = username || '';
     this._baseUrl = resolveBaseUrl(host);
     this._intentionalClose = false;
     this._setConnected(false, 'connecting');
 
     try {
       // 1. POST /api/connect 建立会话
+      const body: Record<string, string> = { token };
+      if (username) body.username = username;
       const res = await fetch(`${this._baseUrl}/api/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
+        body: JSON.stringify(body),
       });
 
       const contentType = res.headers.get('content-type') || '';
@@ -147,6 +162,7 @@ export class ApiClient {
       if (data.state === 'pairing_pending') {
         this._pairingPending = true;
         this._deviceId = data.deviceId || null;
+        this._requestId = data.requestId || null;
         this._connected = false;
         this._gatewayReady = false;
         this._reconnectAttempts = 0;
@@ -160,8 +176,10 @@ export class ApiClient {
       this._hello = data.hello;
       this._snapshot = data.snapshot;
       this._sessionKey = data.sessionKey;
+      this._userId = data.userId || null;
       this._pairingPending = false;
       this._deviceId = null;
+      this._requestId = null;
 
       // 2. 开启 SSE 事件流
       this._setupEventSource();
@@ -233,6 +251,18 @@ export class ApiClient {
       }
     });
 
+    // proxy.pairing_pending（配对重试时更新配对码）
+    es.addEventListener('proxy.pairing_pending', (evt: MessageEvent) => {
+      if (esId !== this._esId) return;
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(evt.data); } catch { /* ignore */ }
+      console.log('[api] 收到配对等待通知:', data);
+      this._pairingPending = true;
+      this._deviceId = (data.deviceId as string) || this._deviceId;
+      this._requestId = (data.requestId as string) || this._requestId;
+      this._setConnected(false, 'pairing_pending');
+    });
+
     // proxy.paired（配对成功）
     es.addEventListener('proxy.paired', (evt: MessageEvent) => {
       if (esId !== this._esId) return;
@@ -242,8 +272,10 @@ export class ApiClient {
       this._hello = (data.hello as Record<string, unknown>) || null;
       this._snapshot = (data.snapshot as Record<string, unknown>) || null;
       this._sessionKey = (data.sessionKey as string) || null;
+      this._userId = (data.userId as string) || null;
       this._pairingPending = false;
       this._deviceId = null;
+      this._requestId = null;
       this._gatewayReady = true;
       this._connected = true;
       this._reconnectAttempts = 0;
@@ -303,6 +335,8 @@ export class ApiClient {
     this._gatewayReady = false;
     this._pairingPending = false;
     this._deviceId = null;
+    this._requestId = null;
+    this._userId = null;
     this._setConnected(false, 'disconnected');
   }
 
@@ -315,7 +349,7 @@ export class ApiClient {
     this._closeEventSource();
     this._sid = null;
     this._gatewayReady = false;
-    this.connect(this._host, this._token);
+    this.connect(this._host, this._token, this._username || undefined);
   }
 
   private _waitReady(timeoutMs = 15000): Promise<{ hello: unknown; sessionKey: string | null }> {
@@ -502,7 +536,7 @@ export class ApiClient {
         : Math.min(1000 * Math.pow(2, this._reconnectAttempts - 2), MAX_RECONNECT_DELAY);
     this._reconnectAttempts++;
     this._setConnected(false, 'reconnecting');
-    this._reconnectTimer = setTimeout(() => this.connect(this._host, this._token), delay);
+    this._reconnectTimer = setTimeout(() => this.connect(this._host, this._token, this._username || undefined), delay);
   }
 }
 

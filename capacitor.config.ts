@@ -7,7 +7,13 @@ const config: CapacitorConfig = {
   server: {
     androidScheme: 'https',
   },
+  android: {
+    allowMixedContent: true,
+  },
   plugins: {
+    CapacitorHttp: {
+      enabled: true,
+    },
     Keyboard: {
       resize: 'body',
       resizeOnFullScreen: true,

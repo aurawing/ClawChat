@@ -137,6 +137,7 @@ const REQUEST_TIMEOUT = 30000;
 const CONNECT_TIMEOUT = 15000;
 const GW_RECONNECT_BASE = 3000;
 const GW_RECONNECT_MAX = 30000;
+const PAIRING_RETRY_INTERVAL = 15000;
 
 // ==================== 共享 Gateway 连接 ====================
 const gw = {
@@ -146,6 +147,7 @@ const gw = {
   snapshot: null,
   defaultSessionKey: null,
   pendingRequests: new Map(),   // reqId → { sid, resolve, reject, timer }
+  pairingRequestId: null,       // Gateway 返回的配对请求 ID（用于控制台定位）
   _heartbeat: null,
   _connectTimer: null,
   _reconnectTimer: null,
@@ -153,6 +155,7 @@ const gw = {
   _connectPromise: null,
   _connectResolve: null,
   _connectReject: null,
+  _pairingRetryTimer: null,
 };
 
 // ==================== 用户会话 ====================
@@ -219,15 +222,16 @@ function broadcastSSE(event, data) {
 
 // ==================== 认证 ====================
 
-function validateToken(token) {
+function validateToken(token, username) {
   if (MULTI_USER) {
     for (const [userId, userToken] of USERS) {
       if (token === userToken) return { valid: true, userId };
     }
     return { valid: false, userId: null };
   }
-  if (!CONFIG.proxyToken) return { valid: true, userId: null };
-  if (token === CONFIG.proxyToken) return { valid: true, userId: null };
+  // 单用户模式：token 匹配即可，username 作为显示名
+  if (!CONFIG.proxyToken) return { valid: true, userId: username || null };
+  if (token === CONFIG.proxyToken) return { valid: true, userId: username || null };
   return { valid: false, userId: null };
 }
 
@@ -317,6 +321,29 @@ function handleGatewayMessage(rawData) {
   if (msg.type === 'res' && msg.id?.startsWith('connect-')) {
     if (!msg.ok || msg.error) {
       const errMsg = msg.error?.message || msg.error?.code || '';
+      const errCode = msg.error?.code || '';
+      const detailCode = msg.error?.details?.code || '';
+
+      // ====== NOT_PAIRED / PAIRING_REQUIRED → 进入配对等待 ======
+      if (errCode === 'NOT_PAIRED' || detailCode === 'PAIRING_REQUIRED' || /pairing.required/i.test(errMsg)) {
+        const requestId = msg.error?.details?.requestId || '';
+        log.info(`⏳ 设备需要配对, deviceId: ${deviceKey.deviceId}, requestId: ${requestId}`);
+        gw.state = 'pairing_pending';
+        gw.pairingRequestId = requestId || null;
+        broadcastSSE('proxy.pairing_pending', {
+          message: '请前往 OpenClaw Web 控制台的 Nodes → Devices 页面批准此设备',
+          deviceId: deviceKey.deviceId,
+          requestId,
+        });
+        // 解决 connect promise 为 pairing_pending（非错误）
+        gw._connectResolve?.('pairing_pending');
+        gw._connectResolve = null;
+        gw._connectReject = null;
+        // Gateway 会关闭连接 → 启动定时重试
+        schedulePairingRetry();
+        return;
+      }
+
       if (gw.state === 'pairing_pending') {
         log.warn(`配对期间收到错误: ${errMsg}`);
         return;
@@ -333,6 +360,7 @@ function handleGatewayMessage(rawData) {
         const rid = msg.payload?.requestId || msg.payload?.pairRequestId || '';
         log.info(`⏳ 设备需要配对, deviceId: ${deviceKey.deviceId}, requestId: ${rid}`);
         gw.state = 'pairing_pending';
+        gw.pairingRequestId = rid || null;
         broadcastSSE('proxy.pairing_pending', {
           message: '请前往 OpenClaw Web 控制台的 Nodes → Devices 页面批准此设备',
           deviceId: deviceKey.deviceId,
@@ -347,6 +375,7 @@ function handleGatewayMessage(rawData) {
       // hello-ok
       log.info(`Gateway 握手成功, type=${resultType}`);
       gw.state = 'connected';
+      gw.pairingRequestId = null;
       gw.hello = msg.payload;
       gw.snapshot = msg.payload?.snapshot || null;
       const defaults = gw.snapshot?.sessionDefaults;
@@ -449,9 +478,8 @@ function connectGateway() {
       const wasConnected = gw.state === 'connected';
       const wasPairing = gw.state === 'pairing_pending';
 
-      // 清理
+      // 清理 WebSocket 相关资源
       gw.ws = null;
-      gw.state = 'disconnected';
       if (gw._heartbeat) { clearInterval(gw._heartbeat); gw._heartbeat = null; }
       if (gw._connectTimer) { clearTimeout(gw._connectTimer); gw._connectTimer = null; }
 
@@ -463,9 +491,19 @@ function connectGateway() {
       gw.pendingRequests.clear();
 
       if (wasPairing) {
-        broadcastSSE('proxy.error', { message: 'Gateway 连接断开，配对中止' });
-        gw._connectReject?.(new Error('Gateway 连接断开'));
-      } else if (wasConnected) {
+        // ====== 配对等待中 Gateway 主动关闭 → 保持 pairing_pending 状态 ======
+        // 不设为 disconnected，定时重试会负责重连
+        log.info('Gateway 连接关闭（配对等待中），定时重试将自动检查配对状态');
+        gw._connectPromise = null;
+        gw._connectResolve = null;
+        gw._connectReject = null;
+        // 不广播错误，配对重试 timer 已在运行
+        return;
+      }
+
+      gw.state = 'disconnected';
+
+      if (wasConnected) {
         broadcastSSE('proxy.disconnect', { message: 'Gateway 连接已断开', code });
         scheduleGatewayReconnect();
       } else {
@@ -487,6 +525,68 @@ function connectGateway() {
   });
 
   return gw._connectPromise;
+}
+
+/** 配对重试：定时重连 Gateway 检查配对是否已批准 */
+function schedulePairingRetry() {
+  if (gw._pairingRetryTimer) return;
+  log.info(`🔄 配对重试已启动，每 ${PAIRING_RETRY_INTERVAL / 1000} 秒检查一次`);
+
+  gw._pairingRetryTimer = setInterval(async () => {
+    // 如果不再是 pairing_pending 状态，停止重试
+    if (gw.state !== 'pairing_pending') {
+      clearInterval(gw._pairingRetryTimer);
+      gw._pairingRetryTimer = null;
+      log.info('配对重试已停止（状态已变更）');
+      return;
+    }
+    // 如果没有活跃会话了，停止重试
+    if (sessions.size === 0) {
+      clearInterval(gw._pairingRetryTimer);
+      gw._pairingRetryTimer = null;
+      gw.state = 'disconnected';
+      log.info('配对重试已停止（无活跃会话）');
+      return;
+    }
+
+    log.info('尝试重连 Gateway（检查配对状态）...');
+    try {
+      // 临时设为 disconnected 以允许 connectGateway 执行
+      gw.state = 'disconnected';
+      const result = await connectGateway();
+
+      if (result === 'connected') {
+        clearInterval(gw._pairingRetryTimer);
+        gw._pairingRetryTimer = null;
+        log.info('✅ 设备配对已通过，Gateway 连接成功');
+
+        // 通知所有 APP 客户端：配对成功
+        for (const [sid, session] of sessions) {
+          const sessionKey = getUserSessionKey(session.userId);
+          session.sessionKeys.add(sessionKey);
+          sseWrite(session, 'proxy.paired', {
+            message: '设备配对成功',
+            hello: gw.hello,
+            snapshot: gw.snapshot,
+            sessionKey,
+            userId: session.userId || null,
+          });
+        }
+      }
+      // 如果仍是 pairing_pending，定时器继续运行
+    } catch (e) {
+      log.debug(`配对重试连接失败: ${e.message}`);
+      // 确保状态保持 pairing_pending
+      if (gw.state === 'disconnected') gw.state = 'pairing_pending';
+    }
+  }, PAIRING_RETRY_INTERVAL);
+}
+
+function stopPairingRetry() {
+  if (gw._pairingRetryTimer) {
+    clearInterval(gw._pairingRetryTimer);
+    gw._pairingRetryTimer = null;
+  }
 }
 
 /** 自动重连（仅在有活跃会话时） */
@@ -593,8 +693,8 @@ app.get('/health', (req, res) => {
 
 /** POST /api/connect — 建立用户会话 */
 app.post('/api/connect', async (req, res) => {
-  const { token } = req.body || {};
-  const auth = validateToken(token);
+  const { token, username } = req.body || {};
+  const auth = validateToken(token, username);
   if (!auth.valid) {
     return res.status(401).json({ ok: false, error: '认证失败：无效的连接密码' });
   }
@@ -615,6 +715,7 @@ app.post('/api/connect', async (req, res) => {
 
     const session = {
       userId,
+      username: username || userId || null,
       token,
       sseRes: null,
       eventBuffer: [],
@@ -627,12 +728,18 @@ app.post('/api/connect', async (req, res) => {
     sessions.set(sid, session);
 
     if (gwState === 'pairing_pending') {
-      log.info(`会话建立（等待配对）[${sid}] userId=${userId || 'default'}`);
-      return res.json({ ok: true, sid, state: 'pairing_pending', deviceId: deviceKey.deviceId });
+      log.info(`会话建立（等待配对）[${sid}] userId=${userId || 'default'} requestId=${gw.pairingRequestId || 'N/A'}`);
+      return res.json({
+        ok: true, sid,
+        state: 'pairing_pending',
+        deviceId: deviceKey.deviceId,
+        requestId: gw.pairingRequestId || null,
+        userId: userId || null,
+      });
     }
 
     log.info(`会话建立成功 [${sid}] userId=${userId || 'default'} sessionKey=${sessionKey}`);
-    res.json({ ok: true, sid, snapshot: gw.snapshot, hello: gw.hello, sessionKey });
+    res.json({ ok: true, sid, snapshot: gw.snapshot, hello: gw.hello, sessionKey, userId: userId || null });
   } catch (e) {
     log.error(`会话建立失败 [${sid}]:`, e.message);
     sessions.delete(sid);
@@ -847,6 +954,7 @@ function shutdown() {
   if (gw._heartbeat) clearInterval(gw._heartbeat);
   if (gw._reconnectTimer) clearTimeout(gw._reconnectTimer);
   if (gw._connectTimer) clearTimeout(gw._connectTimer);
+  stopPairingRetry();
   if (gw.ws && gw.ws.readyState !== WebSocket.CLOSED) gw.ws.close();
   for (const [, pending] of gw.pendingRequests) {
     clearTimeout(pending.timer);

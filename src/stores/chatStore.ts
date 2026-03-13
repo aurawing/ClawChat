@@ -56,6 +56,10 @@ interface ChatState {
   serverConfig: ServerConfig | null;
   errorMessage: string | null;
 
+  // 用户身份
+  userId: string | null;
+  username: string | null;
+
   // 会话
   sessions: Session[];
   currentSessionKey: string | null;
@@ -306,6 +310,8 @@ export const useChatStore = create<ChatState>((set, get) => {
     connectionStatus: 'disconnected' as ConnectionStatus,
     serverConfig: null,
     errorMessage: null,
+    userId: null,
+    username: null,
     sessions: [],
     currentSessionKey: null,
     messages: [],
@@ -325,7 +331,13 @@ export const useChatStore = create<ChatState>((set, get) => {
           set({ errorMessage: meta.message || '连接失败' });
           return;
         }
-        set({ currentSessionKey: sessionKey });
+        // 保存用户身份
+        const resolvedUserId = apiClient.userId || config.username || null;
+        set({
+          currentSessionKey: sessionKey,
+          userId: resolvedUserId,
+          username: config.username || apiClient.userId || null,
+        });
 
         // 保存配置
         localStorage.setItem('clawchat-config', JSON.stringify(config));
@@ -335,7 +347,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         get().loadSessions();
       });
 
-      apiClient.connect(config.host, config.token);
+      apiClient.connect(config.host, config.token, config.username);
     },
 
     disconnect: () => {
@@ -343,6 +355,8 @@ export const useChatStore = create<ChatState>((set, get) => {
       set({
         connectionStatus: 'disconnected',
         serverConfig: null,
+        userId: null,
+        username: null,
         currentSessionKey: null,
         messages: [],
         sessions: [],

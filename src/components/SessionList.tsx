@@ -3,10 +3,12 @@ import type { Session } from '../types';
 interface SessionListProps {
   sessions: Session[];
   currentSessionKey: string | null;
+  username?: string | null;
   onSelectSession: (key: string) => void;
   onDeleteSession: (key: string) => void;
   onRefresh: () => void;
   onClose: () => void;
+  onDisconnect?: () => void;
 }
 
 /**
@@ -15,10 +17,12 @@ interface SessionListProps {
 export default function SessionList({
   sessions,
   currentSessionKey,
+  username,
   onSelectSession,
   onDeleteSession,
   onRefresh,
   onClose,
+  onDisconnect,
 }: SessionListProps) {
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
@@ -114,6 +118,35 @@ export default function SessionList({
           </div>
         )}
       </div>
+
+      {/* 底部用户信息 */}
+      {(username || onDisconnect) && (
+        <div className="border-t border-neutral-800 px-4 py-3">
+          <div className="flex items-center gap-3">
+            {/* 用户头像 */}
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white text-xs font-bold shrink-0">
+              {username ? username.charAt(0).toUpperCase() : '?'}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-neutral-200 truncate">
+                {username || '未命名用户'}
+              </p>
+              <p className="text-xs text-neutral-500">已连接</p>
+            </div>
+            {onDisconnect && (
+              <button
+                onClick={onDisconnect}
+                className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-neutral-500 hover:text-red-400"
+                title="断开连接"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
