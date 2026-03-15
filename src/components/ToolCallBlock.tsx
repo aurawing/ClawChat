@@ -1,6 +1,5 @@
 import { useState, useMemo } from 'react';
 import type { ToolCall } from '../types';
-import { apiClient } from '../services/api-client';
 
 interface ToolCallBlockProps {
   toolCall: ToolCall;
@@ -93,61 +92,6 @@ function truncate(text: string, maxLen: number): string {
   return text.substring(0, maxLen) + '…';
 }
 
-function collectPathLikeStrings(value: unknown, acc: string[]): void {
-  if (!value) return;
-  if (typeof value === 'string') {
-    acc.push(value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectPathLikeStrings(item, acc);
-    return;
-  }
-  if (typeof value === 'object') {
-    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-      if (/path|file|artifact|output|apk|aab|zip|exe|binary|build/i.test(key)) {
-        collectPathLikeStrings(nested, acc);
-      }
-    }
-  }
-}
-
-function extractDownloadablePaths(output: string | undefined): string[] {
-  if (!output) return [];
-
-  const found = new Set<string>();
-  const add = (value: string) => {
-    const trimmed = value.trim().replace(/^["'`]+|["'`]+$/g, '');
-    if (!trimmed || /^https?:\/\//i.test(trimmed)) return;
-    if (!/[\\/]/.test(trimmed)) return;
-    if (!/\.[A-Za-z0-9]{1,12}(?:\s|$)/.test(`${trimmed} `)) return;
-    found.add(trimmed);
-  };
-
-  const json = tryParseJson(output);
-  if (json) {
-    const candidates: string[] = [];
-    collectPathLikeStrings(json, candidates);
-    for (const candidate of candidates) add(candidate);
-  }
-
-  const patterns = [
-    /[A-Za-z]:\\[^\s"'`<>|]+?\.[A-Za-z0-9]{1,12}/g,
-    /(?:\/[^/\s"'`<>]+)+\.[A-Za-z0-9]{1,12}/g,
-    /(?:\.{1,2}[\\/]|(?:dist|build|out|release|android[\\/]|outputs[\\/]))[^\s"'`<>]+?\.[A-Za-z0-9]{1,12}/gi,
-  ];
-  for (const pattern of patterns) {
-    const matches = output.match(pattern) || [];
-    for (const match of matches) add(match);
-  }
-
-  return Array.from(found).slice(0, 8);
-}
-
-function getPathFileName(path: string): string {
-  return path.split(/[\\/]/).pop() || path;
-}
-
 /**
  * 根据工具名称和输入生成人类可读的摘要
  * 参考 OpenClaw Dashboard 风格：`with [动作] [参数摘要]`
@@ -235,7 +179,6 @@ function generateInputSummary(name: string, input: string | undefined): string {
  */
 export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
   const [showDetail, setShowDetail] = useState(false);
-  const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
   const meta = getToolMeta(toolCall.name);
 
   const isRunning = toolCall.status === 'running';
@@ -250,30 +193,6 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
   const duration = toolCall.startedAt && toolCall.finishedAt
     ? ((toolCall.finishedAt - toolCall.startedAt) / 1000).toFixed(1) + 's'
     : null;
-
-  const downloadablePaths = useMemo(
-    () => extractDownloadablePaths(toolCall.output),
-    [toolCall.output],
-  );
-
-  const handleDownload = async (path: string) => {
-    try {
-      setDownloadingPath(path);
-      const { blob, fileName } = await apiClient.downloadGeneratedFile(path);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      alert((e as Error).message || '下载失败');
-    } finally {
-      setDownloadingPath(null);
-    }
-  };
 
   return (
     <div className={`my-1.5 rounded-xl border overflow-hidden ${
@@ -411,24 +330,6 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
               }`}>
                 {truncate(toolCall.output, 3000)}
               </pre>
-              {downloadablePaths.length > 0 && !isError && (
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {downloadablePaths.map((path) => (
-                    <button
-                      key={path}
-                      onClick={() => handleDownload(path)}
-                      disabled={downloadingPath === path}
-                      className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] text-emerald-300 hover:bg-emerald-500/15 disabled:opacity-60"
-                      title={path}
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 16V4m0 12l-4-4m4 4l4-4m5 8v1a2 2 0 01-2 2H5a2 2 0 01-2-2v-1" />
-                      </svg>
-                      {downloadingPath === path ? '下载中…' : `下载 ${getPathFileName(path)}`}
-                    </button>
-                  ))}
-                </div>
-              )}
             </div>
           )}
           {/* 底部状态 */}

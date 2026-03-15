@@ -2,10 +2,54 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import { apiClient } from '../services/api-client';
 
 interface MarkdownRendererProps {
   content: string;
+}
+
+const DOWNLOAD_SCHEME = 'clawchat-download:';
+
+function encodeDownloadHref(path: string): string {
+  return `${DOWNLOAD_SCHEME}${encodeURIComponent(path)}`;
+}
+
+function decodeDownloadHref(href: string): string {
+  return decodeURIComponent(href.slice(DOWNLOAD_SCHEME.length));
+}
+
+function linkifyDownloadablePaths(markdown: string): string {
+  const lines = markdown.split('\n');
+  let inCodeFence = false;
+
+  return lines.map((line) => {
+    const trimmed = line.trimStart();
+    if (/^```/.test(trimmed)) {
+      inCodeFence = !inCodeFence;
+      return line;
+    }
+    if (inCodeFence) return line;
+
+    const pathPattern = /(^|[\s:：])(\/[^\s"'`<>]+?\.[A-Za-z0-9]{1,12}|[A-Za-z]:\\[^\s"'`<>|]+?\.[A-Za-z0-9]{1,12}|(?:\.{1,2}[\\/]|(?:dist|build|out|release|android[\\/]|outputs[\\/]))[^\s"'`<>]+?\.[A-Za-z0-9]{1,12})(?=$|[\s),，。；;!！?？])/g;
+
+    return line.replace(pathPattern, (match, prefix: string, path: string) => {
+      if (/\]\([^)]*$/.test(line.slice(0, line.indexOf(match)))) return match;
+      return `${prefix}[${path}](${encodeDownloadHref(path)})`;
+    });
+  }).join('\n');
+}
+
+async function triggerProxyDownload(path: string) {
+  const { blob, fileName } = await apiClient.downloadGeneratedFile(path);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 /** MIME 类型映射 */
@@ -81,6 +125,8 @@ function CodeBlock({ className, children }: { className?: string; children: Reac
 }
 
 export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
+  const linkedContent = useMemo(() => linkifyDownloadablePaths(content), [content]);
+
   return (
     <div className="markdown-body prose prose-sm max-w-none">
       <ReactMarkdown
@@ -106,13 +152,23 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
             return <CodeBlock className={className}>{children}</CodeBlock>;
           },
           a({ children, href, ...props }) {
+            const isDownloadLink = typeof href === 'string' && href.startsWith(DOWNLOAD_SCHEME);
             return (
               <a
                 href={href}
-                target="_blank"
-                rel="noopener noreferrer"
+                target={isDownloadLink ? undefined : '_blank'}
+                rel={isDownloadLink ? undefined : 'noopener noreferrer'}
                 style={{ color: 'var(--cc-link-color)' }}
                 className="hover:opacity-80 underline"
+                onClick={async (e) => {
+                  if (!isDownloadLink || !href) return;
+                  e.preventDefault();
+                  try {
+                    await triggerProxyDownload(decodeDownloadHref(href));
+                  } catch (err) {
+                    alert((err as Error).message || '下载失败');
+                  }
+                }}
                 {...props}
               >
                 {children}
@@ -140,7 +196,7 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
           },
         }}
       >
-        {content}
+        {linkedContent}
       </ReactMarkdown>
     </div>
   );

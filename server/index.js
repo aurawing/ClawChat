@@ -31,6 +31,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const ENV_PATH = join(__dirname, '.env');
 
+function parseDownloadPathMaps(raw) {
+  return String(raw || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [from, to] = entry.split('=>').map((s) => s?.trim());
+      if (!from || !to) return null;
+      return { from, to: resolve(__dirname, to) };
+    })
+    .filter(Boolean);
+}
+
 // ==================== 自动创建 .env ====================
 if (!existsSync(ENV_PATH)) {
   const tmpToken = randomBytes(12).toString('base64url');
@@ -59,6 +72,10 @@ if (!existsSync(ENV_PATH)) {
     '# 例如: DOWNLOAD_ROOTS=../dist,../android/app/build/outputs,../release',
     'DOWNLOAD_ROOTS=../dist,../android/app/build/outputs,../build,../out,../release',
     '',
+    '# 可选：将智能体输出中的虚拟路径映射到本机真实路径',
+    '# 例如: DOWNLOAD_PATH_MAPS=/root/.openclaw/workspace=>../workspace',
+    'DOWNLOAD_PATH_MAPS=',
+    '',
     '# 日志级别: error / warn / info / debug / trace',
     '# trace 级别会打印与 Gateway 交互的所有完整 JSON 帧',
     'LOG_LEVEL=info',
@@ -83,6 +100,7 @@ const CONFIG = {
     .map((s) => s.trim())
     .filter(Boolean)
     .map((p) => resolve(__dirname, p)),
+  downloadPathMaps: parseDownloadPathMaps(process.env.DOWNLOAD_PATH_MAPS),
   distPath: join(__dirname, '..', 'dist'),
 };
 
@@ -381,17 +399,30 @@ function isPathWithinRoot(targetPath, rootPath) {
   return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(normalizedRoot + '\\') || normalizedTarget.startsWith(normalizedRoot + '/');
 }
 
+function translateDownloadPath(rawPath) {
+  const normalizedInput = rawPath.trim().replace(/^["']|["']$/g, '');
+  for (const mapping of CONFIG.downloadPathMaps) {
+    if (normalizedInput === mapping.from || normalizedInput.startsWith(mapping.from + '/') || normalizedInput.startsWith(mapping.from + '\\')) {
+      const suffix = normalizedInput.slice(mapping.from.length).replace(/^[\\/]+/, '');
+      return resolve(mapping.to, suffix);
+    }
+  }
+  return null;
+}
+
 function resolveDownloadableFilePath(rawPath) {
   if (!rawPath || typeof rawPath !== 'string') return null;
   const normalizedInput = rawPath.trim().replace(/^["']|["']$/g, '');
   if (!normalizedInput) return null;
 
+  const translatedPath = translateDownloadPath(normalizedInput);
   const candidates = normalizedInput.match(/^[A-Za-z]:[\\/]/) || normalizedInput.startsWith('/')
-    ? [resolve(normalizedInput)]
+    ? [translatedPath, resolve(normalizedInput)].filter(Boolean)
     : [
+        translatedPath,
         resolve(process.cwd(), normalizedInput),
         ...CONFIG.downloadRoots.map((root) => resolve(root, normalizedInput)),
-      ];
+      ].filter(Boolean);
 
   for (const resolvedPath of candidates) {
     const allowedRoot = CONFIG.downloadRoots.find((root) => isPathWithinRoot(resolvedPath, root));

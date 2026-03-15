@@ -55,10 +55,11 @@ export default function ImageViewer({ src, alt, onClose }: ImageViewerProps) {
     >
       {/* 关闭按钮 */}
       <button
-        className="absolute top-4 right-4 w-10 h-10 flex items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors z-10 safe-area-top"
+        className="absolute right-4 w-10 h-10 flex items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors z-10 p-0 leading-none"
+        style={{ top: 'calc(env(safe-area-inset-top, 0px) + 1rem)' }}
         onClick={onClose}
       >
-        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <svg className="block w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
         </svg>
       </button>

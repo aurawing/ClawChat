@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useChatStore } from '../stores/chatStore';
+import { apiClient } from '../services/api-client';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import SessionList from '../components/SessionList';
 import { useTheme } from '../hooks/useTheme';
-import type { FileAttachment, Message, MessageBlock, ServerConfig, ToolCall } from '../types';
+import type { ChatMessage, ContentBlock, FileAttachment, Message, MessageBlock, ServerConfig, ToolCall } from '../types';
 
 function normalizeAssistantBlocks(message: Message): MessageBlock[] {
   if (message.blocks?.length) {
@@ -121,6 +122,156 @@ function expandAssistantMessages(messages: Message[]): Message[] {
   return expanded;
 }
 
+function extractThinkingContent(text: string): string {
+  const matches = Array.from(text.matchAll(/<thinking>([\s\S]*?)<\/thinking>/gi))
+    .map((match) => match[1]?.trim())
+    .filter(Boolean);
+  return matches.join('\n\n---\n\n');
+}
+
+function stripThinkingTags(text: string): string {
+  return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '').trim();
+}
+
+function extractContentBlockText(content: unknown): string {
+  if (typeof content === 'string') return stripThinkingTags(content);
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((block) => {
+      const rec = block as unknown as Record<string, unknown>;
+      return typeof rec.text === 'string' ? stripThinkingTags(rec.text) : '';
+    })
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+}
+
+function extractTextFromHistoryMessage(msg: ChatMessage): string {
+  if (typeof msg.text === 'string' && msg.text.trim()) return stripThinkingTags(msg.text);
+  return extractContentBlockText(msg.content);
+}
+
+function extractToolCallId(rec: Record<string, unknown>): string | undefined {
+  return (rec.tool_use_id || rec.tool_call_id || rec.toolCallId || rec.id) as string | undefined;
+}
+
+function extractToolCallName(rec: Record<string, unknown>): string {
+  return ((rec.name as string) || (rec.tool_name as string) || (rec.toolName as string) || 'tool');
+}
+
+function stringifyToolPayload(payload: unknown): string | undefined {
+  if (payload === undefined || payload === null || payload === '') return undefined;
+  return typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+}
+
+function parseHistoryDetailMessages(history: ChatMessage[]): Message[] {
+  const toolResults = new Map<string, { output: string; isError?: boolean }>();
+
+  for (const msg of history) {
+    const role = String(msg.role || '');
+    if (role === 'tool' || role === 'tool_result' || role === 'toolResult') {
+      const tcId = extractToolCallId(msg as unknown as Record<string, unknown>);
+      const output = typeof msg.content === 'string' ? msg.content : extractContentBlockText(msg.content);
+      if (tcId && output) {
+        const rec = msg as unknown as Record<string, unknown>;
+        toolResults.set(tcId, { output, isError: !!(rec.is_error ?? rec.isError) });
+      }
+    }
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content as ContentBlock[]) {
+        const rec = block as unknown as Record<string, unknown>;
+        if (rec.type === 'tool_result' && extractToolCallId(rec)) {
+          const tcId = extractToolCallId(rec)!;
+          const output = extractContentBlockText(rec.content) || (rec.output as string) || (rec.text as string) || '';
+          if (output) toolResults.set(tcId, { output, isError: !!(rec.is_error ?? rec.isError) });
+        }
+      }
+    }
+  }
+
+  const messages: Message[] = [];
+  for (const msg of history) {
+    const role = String(msg.role || '');
+    if (role !== 'user' && role !== 'assistant') continue;
+
+    const text = extractTextFromHistoryMessage(msg);
+    let thinking: string | undefined;
+    let toolCalls: ToolCall[] | undefined;
+    let blocks: MessageBlock[] | undefined;
+
+    if (role === 'assistant') {
+      const parsedToolCalls: ToolCall[] = [];
+      const parsedBlocks: MessageBlock[] = [];
+      if (Array.isArray(msg.content)) {
+        for (const block of msg.content as ContentBlock[]) {
+          const rec = block as unknown as Record<string, unknown>;
+          if (rec.type === 'thinking' && typeof rec.thinking === 'string') {
+            parsedBlocks.push({ type: 'thinking', content: rec.thinking as string });
+          } else if (rec.type === 'text' && typeof rec.text === 'string') {
+            const thk = extractThinkingContent(rec.text as string);
+            const clean = stripThinkingTags(rec.text as string);
+            if (thk) parsedBlocks.push({ type: 'thinking', content: thk });
+            if (clean) parsedBlocks.push({ type: 'text', content: clean });
+          } else if ((rec.type === 'tool_use' || rec.type === 'toolCall') && extractToolCallId(rec)) {
+            const tcId = extractToolCallId(rec)!;
+            const result = toolResults.get(tcId);
+            parsedToolCalls.push({
+              id: tcId,
+              name: extractToolCallName(rec),
+              status: result ? (result.isError ? 'error' : 'done') : 'done',
+              input: stringifyToolPayload(rec.input ?? rec.arguments ?? rec.params),
+              output: result?.output,
+              startedAt: msg.timestamp || Date.now(),
+              finishedAt: result ? (msg.timestamp || Date.now()) : undefined,
+            });
+            parsedBlocks.push({ type: 'tool', toolCallId: tcId });
+          }
+        }
+      } else if (typeof msg.content === 'string') {
+        const thk = extractThinkingContent(msg.content);
+        if (thk) parsedBlocks.push({ type: 'thinking', content: thk });
+      }
+
+      if (parsedToolCalls.length) toolCalls = parsedToolCalls;
+      if (parsedBlocks.length) blocks = parsedBlocks;
+
+      const taggedThinking = typeof msg.content === 'string' ? extractThinkingContent(msg.content) : '';
+      if (taggedThinking) thinking = taggedThinking;
+      if (!thinking && blocks?.length) {
+        const thinkingBlocks = blocks.filter((block) => block.type === 'thinking' && block.content).map((block) => block.content!);
+        if (thinkingBlocks.length) thinking = thinkingBlocks.join('\n\n---\n\n');
+      }
+      if (!blocks && (toolCalls?.length || thinking)) {
+        const fallback: MessageBlock[] = [];
+        if (thinking) fallback.push({ type: 'thinking', content: thinking });
+        if (toolCalls?.length) {
+          fallback.push(...toolCalls.map((tc): MessageBlock => ({ type: 'tool', toolCallId: tc.id })));
+        }
+        if (text) fallback.push({ type: 'text', content: text });
+        blocks = fallback;
+      } else if (blocks && text && !blocks.some((block) => block.type === 'text' && block.content?.trim())) {
+        blocks = [...blocks, { type: 'text', content: text }];
+      }
+    }
+
+    if (!text && !thinking && !toolCalls?.length && !blocks?.length) continue;
+
+    messages.push({
+      id: (msg.id as string) || `history-${messages.length}-${Date.now()}`,
+      sessionKey: '',
+      role: role === 'assistant' ? 'assistant' : 'user',
+      content: text,
+      thinking,
+      toolCalls,
+      blocks,
+      createdAt: msg.timestamp || Date.now(),
+      isStreaming: false,
+    });
+  }
+
+  return messages;
+}
+
 /**
  * 聊天主页面
  */
@@ -156,6 +307,10 @@ export default function ChatPage() {
   const { theme, toggleTheme } = useTheme();
   const [showSidebar, setShowSidebar] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showHistoryDetail, setShowHistoryDetail] = useState(false);
+  const [historyDetailMessages, setHistoryDetailMessages] = useState<Message[]>([]);
+  const [historyDetailLoading, setHistoryDetailLoading] = useState(false);
+  const [historyDetailError, setHistoryDetailError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isUserNearBottomRef = useRef(true);
@@ -210,6 +365,32 @@ export default function ChatPage() {
       } catch { /* ignore */ }
     })();
   }, [theme]);
+
+  useEffect(() => {
+    if (!showHistoryDetail || !currentSessionKey || !apiClient.gatewayReady) return;
+    let cancelled = false;
+
+    setHistoryDetailLoading(true);
+    setHistoryDetailError(null);
+
+    apiClient.chatHistory(currentSessionKey)
+      .then((result) => {
+        if (cancelled) return;
+        const parsed = parseHistoryDetailMessages(((result as { messages?: ChatMessage[] })?.messages) || []);
+        setHistoryDetailMessages(parsed.map((msg) => ({ ...msg, sessionKey: currentSessionKey })));
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setHistoryDetailError((e as Error).message || '加载历史详情失败');
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryDetailLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showHistoryDetail, currentSessionKey]);
 
   const handleSend = useCallback(
     (content: string, attachments?: FileAttachment[]) => {
@@ -275,7 +456,7 @@ export default function ChatPage() {
 
   const renderedMessages = useMemo(() => expandAssistantMessages(displayMessages), [displayMessages]);
 
-  const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiThinking && !currentAiMessageId;
+  const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiThinking;
 
   const currentSession = sessions.find((s) => s.key === currentSessionKey);
   const currentTitle = currentSession?.title || (currentSessionKey ? extractTitle(currentSessionKey) : 'ClawChat');
@@ -393,6 +574,15 @@ export default function ChatPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
             </button>
+            <button
+              onClick={() => setShowHistoryDetail(true)}
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
+              title="历史详情"
+            >
+              <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17h6M9 13h6M9 9h6M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" />
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -439,6 +629,15 @@ export default function ChatPage() {
             setTimeout(() => connect(config), 100);
           }}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+      {showHistoryDetail && (
+        <HistoryDetailModal
+          title={currentTitle}
+          messages={historyDetailMessages}
+          loading={historyDetailLoading}
+          error={historyDetailError}
+          onClose={() => setShowHistoryDetail(false)}
         />
       )}
     </div>
@@ -627,12 +826,63 @@ function ThinkingPlaceholder() {
       <div className="w-7 h-7 rounded-full mr-2 mt-1 shrink-0 overflow-hidden">
         <img src="/icon-192.png" alt="AI" className="w-full h-full object-cover" />
       </div>
-      <div className="bg-th-elevated/60 rounded-2xl rounded-tl-md px-4 py-3">
-        <div className="flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full bg-th-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
-          <span className="w-2 h-2 rounded-full bg-th-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
-          <span className="w-2 h-2 rounded-full bg-th-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
+      <div className="bg-th-elevated/60 rounded-2xl rounded-tl-md px-4 py-3 min-w-[150px]">
+        <div className="flex items-center gap-2 text-sm text-th-text-muted">
+          <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          <span>正在思考</span>
         </div>
+        <div className="mt-2 h-1.5 w-24 rounded-full bg-th-border-subtle overflow-hidden">
+          <div className="h-full w-1/2 rounded-full bg-emerald-400/70 animate-pulse" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HistoryDetailModal({
+  title,
+  messages,
+  loading,
+  error,
+  onClose,
+}: {
+  title: string;
+  messages: Message[];
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 bg-th-base">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-th-border-subtle bg-th-base/95 backdrop-blur-sm safe-area-top">
+        <button
+          onClick={onClose}
+          className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
+          title="关闭"
+        >
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+        </button>
+        <div className="min-w-0">
+          <h2 className="text-sm font-medium text-th-text truncate">{title}</h2>
+          <p className="text-xs text-th-text-dim">历史详情（仅来自 chat.history）</p>
+        </div>
+      </div>
+
+      <div
+        className="overflow-y-auto px-4 py-4"
+        style={{ height: 'calc(100vh - env(safe-area-inset-top, 0px) - 57px)' }}
+      >
+        {loading ? (
+          <div className="text-sm text-th-text-muted">正在加载历史详情...</div>
+        ) : error ? (
+          <div className="text-sm text-red-400">{error}</div>
+        ) : messages.length === 0 ? (
+          <div className="text-sm text-th-text-muted">历史记录为空</div>
+        ) : (
+          messages.map((msg) => <MessageBubble key={`detail-${msg.id}`} message={msg} />)
+        )}
       </div>
     </div>
   );
