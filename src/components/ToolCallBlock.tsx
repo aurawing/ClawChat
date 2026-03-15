@@ -105,47 +105,55 @@ function generateInputSummary(name: string, input: string | undefined): string {
   if (parsed) {
     // Exec / Bash / Shell 类
     if (/bash|shell|exec|command|terminal|run/i.test(lower)) {
-      const cmd = (parsed.command || parsed.cmd || parsed.script || parsed.code) as string;
+      const cmd = (parsed.command || parsed.cmd || parsed.script || parsed.code || parsed.inline) as string;
       if (cmd) return `run ${truncate(cmd, 200)}`;
-      // 内联脚本
-      const inline = (parsed.inline || parsed.code_inline) as string;
-      if (inline) return `run inline script \`${truncate(inline, 200)}\``;
     }
 
     // Write / 文件写入
-    if (/write|save|create/i.test(lower)) {
-      const path = (parsed.path || parsed.file_path || parsed.filename || parsed.file) as string;
-      const content = (parsed.content || parsed.text || parsed.data) as string;
+    if (/write|save|create|mkdir|touch/i.test(lower)) {
+      const path = (parsed.path || parsed.file_path || parsed.filename || parsed.file || parsed.target_file) as string;
+      const content = (parsed.content || parsed.text || parsed.data || parsed.contents) as string;
       const size = content ? `(${content.length} chars)` : '';
       if (path) return `to ${path} ${size}`.trim();
     }
 
     // Read / 文件读取
-    if (/read|cat|head|tail/i.test(lower)) {
-      const path = (parsed.path || parsed.file_path || parsed.filename || parsed.file) as string;
+    if (/read|cat|head|tail|read_file/i.test(lower)) {
+      const path = (parsed.path || parsed.file_path || parsed.filename || parsed.file || parsed.target_file) as string;
       if (path) return `from ${path}`;
     }
 
-    // Search / 搜索
-    if (/search|find|grep|glob|ls/i.test(lower)) {
-      const query = (parsed.query || parsed.pattern || parsed.keyword || parsed.path || parsed.directory) as string;
-      if (query) return `"${truncate(query, 120)}"`;
+    // Web 搜索
+    if (/web_search|websearch|web search/i.test(lower)) {
+      const query = (parsed.search_term || parsed.query || parsed.search_query || parsed.keyword || parsed.q) as string;
+      if (query) return `"${truncate(query, 150)}"`;
     }
 
-    // Web / HTTP
+    // 代码搜索 / 文件搜索
+    if (/search|find|grep|glob|ls|list|codebase_search|file_search/i.test(lower)) {
+      const query = (parsed.query || parsed.pattern || parsed.keyword || parsed.search_term
+        || parsed.path || parsed.directory || parsed.glob_pattern || parsed.target_directories) as string;
+      if (query) {
+        const qStr = typeof query === 'string' ? query : JSON.stringify(query);
+        return `"${truncate(qStr, 150)}"`;
+      }
+    }
+
+    // Web / HTTP / Browse
     if (/browse|web|fetch|http|api|url|curl|request/i.test(lower)) {
-      const url = (parsed.url || parsed.endpoint || parsed.href) as string;
+      const url = (parsed.url || parsed.endpoint || parsed.href || parsed.search_term) as string;
       if (url) return `${parsed.method || 'GET'} ${truncate(url, 200)}`;
     }
 
-    // Edit / 编辑
-    if (/edit/i.test(lower)) {
-      const path = (parsed.path || parsed.file_path || parsed.file) as string;
+    // Edit / 编辑 / Replace
+    if (/edit|replace|search_replace/i.test(lower)) {
+      const path = (parsed.path || parsed.file_path || parsed.file || parsed.target_file) as string;
       if (path) return `${path}`;
     }
 
-    // 通用：列出主要参数
-    const keys = Object.keys(parsed);
+    // 通用：列出有意义的参数（跳过太长的值和元数据字段）
+    const metaKeys = new Set(['type', 'id', 'name', 'status', 'phase', 'toolCallId', 'tool_call_id']);
+    const keys = Object.keys(parsed).filter(k => !metaKeys.has(k));
     if (keys.length > 0) {
       const parts: string[] = [];
       for (const k of keys.slice(0, 3)) {
@@ -154,9 +162,11 @@ function generateInputSummary(name: string, input: string | undefined): string {
           parts.push(`${k}: ${truncate(v, 80)}`);
         } else if (typeof v === 'number' || typeof v === 'boolean') {
           parts.push(`${k}: ${v}`);
+        } else if (Array.isArray(v)) {
+          parts.push(`${k}: [${v.length} items]`);
         }
       }
-      return parts.join(', ');
+      if (parts.length > 0) return parts.join(', ');
     }
   }
 

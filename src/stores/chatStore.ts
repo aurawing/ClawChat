@@ -99,6 +99,26 @@ function extractText(message?: ChatMessage): string {
   return '';
 }
 
+function extractRawMessageText(message?: ChatMessage): string {
+  if (!message) return '';
+  if (typeof message.content === 'string') return message.content;
+  if (Array.isArray(message.content)) {
+    const texts: string[] = [];
+    for (const block of message.content as ContentBlock[]) {
+      if (block.type === 'text' && typeof block.text === 'string') {
+        texts.push(block.text);
+      }
+      const rec = block as Record<string, unknown>;
+      if (block.type === 'thinking' && typeof rec.thinking === 'string') {
+        texts.push(`<thinking>${rec.thinking as string}</thinking>`);
+      }
+    }
+    return texts.join('\n');
+  }
+  if (typeof message.text === 'string') return message.text;
+  return '';
+}
+
 /** 从 Gateway 消息中提取图片和文件附件 */
 function extractAttachments(message?: ChatMessage): FileAttachment[] {
   if (!message) return [];
@@ -379,6 +399,24 @@ function extractContentBlockText(content: unknown): string | undefined {
   return undefined;
 }
 
+function hasAssistantMetaContent(message?: ChatMessage): boolean {
+  if (!message) return false;
+  if (typeof message.content === 'string') {
+    return !!extractThinkingContent(message.content);
+  }
+  if (Array.isArray(message.content)) {
+    return message.content.some((block) => {
+      const b = block as Record<string, unknown>;
+      if (b.type === 'tool_use' || b.type === 'thinking') return true;
+      if (b.type === 'text' && typeof b.text === 'string') {
+        return !!extractThinkingContent(b.text as string);
+      }
+      return false;
+    });
+  }
+  return false;
+}
+
 /** 快照当前 blocks（补全最后一个 thinking 段 + 剩余文本段） */
 function _snapshotBlocks(state: ChatState): MessageBlock[] {
   const blocks = [...state.currentBlocks];
@@ -596,10 +634,33 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
     if (!toolCallId) return;
     const name = (data?.name as string) || (data?.tool_name as string) || 'tool';
     const phase = (data?.phase as string) || (data?.status as string) || '';
-    const inputRaw = data?.input ?? data?.arguments ?? data?.params ?? data?.tool_input ?? data?.command;
-    const outputRaw = data?.output ?? data?.result ?? data?.content ?? data?.tool_result ?? data?.text ?? data?.response;
-    const inputStr = inputRaw ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2)) : undefined;
-    const outputStr = outputRaw ? (typeof outputRaw === 'string' ? outputRaw : JSON.stringify(outputRaw, null, 2)) : undefined;
+    const inputRaw = data?.input ?? data?.arguments ?? data?.params
+      ?? data?.tool_input ?? data?.command ?? data?.query
+      ?? data?.search_query ?? data?.file_path ?? data?.path
+      ?? data?.code ?? data?.script;
+    let outputRaw = data?.output ?? data?.result ?? data?.tool_result ?? data?.response;
+    if (!outputRaw && data?.content) {
+      outputRaw = extractContentBlockText(data.content) ?? data.content;
+    }
+    if (!outputRaw && data?.text && phase !== 'start') {
+      outputRaw = data.text;
+    }
+    // 兜底 input
+    let inputFallback: unknown = undefined;
+    if (!inputRaw && data && phase === 'start') {
+      const metaKeys = new Set(['toolCallId', 'id', 'tool_call_id', 'name', 'tool_name', 'phase', 'status', 'error', 'type', 'stream']);
+      const extra: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(data)) {
+        if (!metaKeys.has(k) && v !== undefined && v !== null && v !== '') extra[k] = v;
+      }
+      if (Object.keys(extra).length > 0) inputFallback = extra;
+    }
+    const inputStr = inputRaw
+      ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2))
+      : (inputFallback ? JSON.stringify(inputFallback, null, 2) : undefined);
+    const outputStr = outputRaw
+      ? (typeof outputRaw === 'string' ? outputRaw : JSON.stringify(outputRaw, null, 2))
+      : undefined;
     const errorStr = data?.error ? (typeof data.error === 'string' ? data.error : JSON.stringify(data.error)) : undefined;
 
     const isNew = !bg.toolCards.has(toolCallId as string);
@@ -650,9 +711,9 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
   const { state: chatState } = payload;
 
   if (chatState === 'final') {
-    const rawText = extractText(payload.message);
-    const text = rawText ? stripThinkingTags(rawText) : '';
-    const thinking = rawText ? extractThinkingContent(rawText) : '';
+    const rawMessageText = extractRawMessageText(payload.message);
+    const text = extractText(payload.message);
+    const thinking = rawMessageText ? extractThinkingContent(rawMessageText) : '';
 
     const bg = bgStreams.get(sk);
     const toolCalls = bg && bg.toolCards.size > 0
@@ -680,7 +741,7 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
 
     if (text || toolCalls) {
       const msg: Message = {
-        id: bg?.msgId || `ai-${uuid()}`,
+        id: (payload.message?.id as string) || bg?.msgId || `ai-${uuid()}`,
         sessionKey: sk,
         role: 'assistant',
         content: text || bg?.text || '',
@@ -737,10 +798,10 @@ export const useChatStore = create<ChatState>((set, get) => {
     const { state: chatState } = payload;
 
     if (chatState === 'delta') {
-      const rawText = extractText(payload.message);
-      const thinking = rawText ? extractThinkingContent(rawText) : '';
-      const text = rawText ? stripThinkingTags(rawText) : '';
-      const msgId = state.currentAiMessageId || `ai-${uuid()}`;
+      const rawMessageText = extractRawMessageText(payload.message);
+      const text = extractText(payload.message);
+      const thinking = rawMessageText ? extractThinkingContent(rawMessageText) : '';
+      const msgId = (payload.message?.id as string) || state.currentAiMessageId || `ai-${uuid()}`;
 
       const updates: Record<string, unknown> = {
         isStreaming: true,
@@ -748,15 +809,35 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentRunId: payload.runId || state.currentRunId,
         lastAbortedUserMsgId: null,
       };
-      // 文本累积（使用多轮累积辅助函数，防止重复追加）
-      if (text) {
-        const acc = accumulateText(text, state.currentAiText, state._turnBaseText, state._lastTurnDelta);
-        updates.currentAiText = acc.text;
-        updates._turnBaseText = acc.base;
-        updates._lastTurnDelta = acc.delta;
-      }
-      // 思维链累积
-      if (thinking) {
+
+      // ====== Agent 模式下跳过文本/思维链累积 ======
+      // 当 agent 事件流（handleAgentEvent）正在运行时，
+      // 文本和思维链由 agent 事件准确分离后累积。
+      // chat 事件可能携带不同格式的相同内容（如不带 <think> 标签的纯文本），
+      // 导致思维链内容泄漏到 currentAiText 中出现重复。
+      // 因此在 agent 模式下仅处理 tool_use 块，跳过文本累积。
+      const isAgentMode = !!(state.currentRunId || payload.runId);
+      if (!isAgentMode) {
+        // 文本累积（使用多轮累积辅助函数，防止重复追加）
+        if (text) {
+          const acc = accumulateText(text, state.currentAiText, state._turnBaseText, state._lastTurnDelta);
+          updates.currentAiText = acc.text;
+          updates._turnBaseText = acc.base;
+          updates._lastTurnDelta = acc.delta;
+        }
+        // 思维链累积
+        if (thinking) {
+          if (thinking.length > state.currentAiThinking.length) {
+            updates.currentAiThinking = thinking;
+          } else if (!state.currentAiThinking.endsWith(thinking)) {
+            updates.currentAiThinking = state.currentAiThinking
+              ? state.currentAiThinking + '\n\n---\n\n' + thinking
+              : thinking;
+          }
+        }
+      } else if (thinking) {
+        // agent 模式下仍允许 chat 事件补充 thinking；
+        // 只跳过 text，避免与 agent assistant 流重复累积正文。
         if (thinking.length > state.currentAiThinking.length) {
           updates.currentAiThinking = thinking;
         } else if (!state.currentAiThinking.endsWith(thinking)) {
@@ -841,20 +922,22 @@ export const useChatStore = create<ChatState>((set, get) => {
         }
       }
 
-      if (rawText) set(updates as Partial<ChatState>);
+      // 始终更新基础状态（isStreaming, msgId, runId）；
+      // 在非 agent 模式下还会包含 text/thinking 更新
+      if (text || thinking || isAgentMode) set(updates as Partial<ChatState>);
       return;
     }
 
     if (chatState === 'final') {
-      const rawText = extractText(payload.message);
-      const text = rawText ? stripThinkingTags(rawText) : '';
-      const thinking = rawText ? extractThinkingContent(rawText) : '';
+      const rawMessageText = extractRawMessageText(payload.message);
+      const text = extractText(payload.message);
+      const thinking = rawMessageText ? extractThinkingContent(rawMessageText) : '';
       const currentText = state.currentAiText;
 
       // 忽略空 final
       if (!state.currentAiMessageId && !text) return;
 
-      const msgId = state.currentAiMessageId || `ai-${uuid()}`;
+      const msgId = (payload.message?.id as string) || state.currentAiMessageId || `ai-${uuid()}`;
       const finalText = text || currentText;
       const finalThinking = thinking || state.currentAiThinking;
 
@@ -877,7 +960,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
         set((s) => ({
           messages: [
-            ...s.messages.filter((m) => m.id !== msgId),
+            ...s.messages.filter((m) => m.id !== msgId && m.id !== state.currentAiMessageId),
             aiMsg,
           ],
           isStreaming: false,
@@ -1101,9 +1184,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       const name = (data?.name as string) || (data?.tool_name as string) || 'tool';
       const phase = (data?.phase as string) || (data?.status as string) || '';
 
-      // 提取工具 input — 尝试多种字段路径
+      // 提取工具 input — 尝试多种字段路径（覆盖不同 Gateway 格式）
       const inputRaw = data?.input ?? data?.arguments ?? data?.params
-        ?? data?.tool_input ?? data?.command;
+        ?? data?.tool_input ?? data?.command ?? data?.query
+        ?? data?.search_query ?? data?.file_path ?? data?.path
+        ?? data?.code ?? data?.script;
       // 提取工具 output — 尝试多种字段路径 + content block 数组解析
       let outputRaw = data?.output ?? data?.result ?? data?.tool_result ?? data?.response;
       if (!outputRaw && data?.content) {
@@ -1113,10 +1198,20 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (!outputRaw && data?.text && phase !== 'start') {
         outputRaw = data.text;
       }
+      // 兜底：如果没有匹配到任何已知字段，提取 data 中除元数据外的所有字段作为 input
+      let inputFallback: unknown = undefined;
+      if (!inputRaw && data && phase === 'start') {
+        const metaKeys = new Set(['toolCallId', 'id', 'tool_call_id', 'name', 'tool_name', 'phase', 'status', 'error', 'type', 'stream']);
+        const extra: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(data)) {
+          if (!metaKeys.has(k) && v !== undefined && v !== null && v !== '') extra[k] = v;
+        }
+        if (Object.keys(extra).length > 0) inputFallback = extra;
+      }
       // 序列化
       const inputStr = inputRaw
         ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2))
-        : undefined;
+        : (inputFallback ? JSON.stringify(inputFallback, null, 2) : undefined);
       const outputStr = outputRaw
         ? (typeof outputRaw === 'string' ? outputRaw : JSON.stringify(outputRaw, null, 2))
         : undefined;
@@ -1334,7 +1429,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         set((s) => ({
           sessions: [newSession, ...s.sessions],
         }));
-        // 持久化标题
+        // 立即持久化，避免被稍后一次 loadSessions 覆盖掉
+        db.saveSession(newSession).catch(() => {});
         db.updateSessionTitle(sessionKey, title).catch(() => {});
         apiClient.saveSessionTitle(sessionKey, title).catch(() => {});
       }
@@ -1574,10 +1670,18 @@ export const useChatStore = create<ChatState>((set, get) => {
           apiClient.getSessionMeta(sessionKey).catch(() => [] as Array<{messageId: string; toolCalls?: ToolCall[]; thinking?: string; blocks?: MessageBlock[]}>),
         ]);
 
-        // 构建服务端元数据索引（messageId → meta）
-        const serverMetaById = new Map<string, { toolCalls?: ToolCall[]; thinking?: string; blocks?: MessageBlock[] }>();
+        // 构建服务端元数据索引（messageId → meta）+ 文本匹配索引
+        type MetaEntry = { toolCalls?: ToolCall[]; thinking?: string; blocks?: MessageBlock[] };
+        const serverMetaById = new Map<string, MetaEntry>();
+        const serverMetaByText = new Map<string, MetaEntry>();
         for (const m of serverMeta) {
           if (m.messageId) serverMetaById.set(m.messageId, m);
+          // 同时用 toolCalls 中的信息构建文本匹配索引（用于 ID 不匹配时的回退）
+          if (m.toolCalls?.length) {
+            // 用工具名列表作为辅助匹配键
+            const toolKey = m.toolCalls.map((tc: ToolCall) => tc.name).sort().join(',');
+            if (toolKey) serverMetaByText.set(toolKey, m);
+          }
         }
 
         // 构建本地 DB 附件匹配索引 + 工具调用索引
@@ -1652,6 +1756,10 @@ export const useChatStore = create<ChatState>((set, get) => {
         const messages: Message[] = [];
         let localUserMsgIdx = 0;
         let serverAttIdx = 0;
+        const localAssistantMetaCandidates = localMessages.filter(
+          (lm) => lm.role === 'assistant' && (lm.toolCalls?.length || lm.thinking || lm.blocks?.length)
+        );
+        let localAssistantMetaIdx = 0;
 
         for (const msg of result.messages) {
           const role = msg.role as string;
@@ -1721,8 +1829,6 @@ export const useChatStore = create<ChatState>((set, get) => {
             }
           }
 
-          if (!text && attachments.length === 0) continue;
-
           // ====== 恢复工具调用 + 思维链 + blocks 数据 ======
           // 优先级：Gateway 消息内容解析 → 服务端元数据 → 本地 IndexedDB
           let toolCalls: ToolCall[] | undefined;
@@ -1786,8 +1892,12 @@ export const useChatStore = create<ChatState>((set, get) => {
             const rawTextContent = typeof msg.content === 'string' ? msg.content : '';
             const tagThinking = rawTextContent ? extractThinkingContent(rawTextContent) : '';
 
-            // ③ 从服务端元数据恢复
-            const sMeta = msgId ? serverMetaById.get(msgId) : undefined;
+            // ③ 从服务端元数据恢复（先按 ID，再按工具名列表匹配）
+            let sMeta = msgId ? serverMetaById.get(msgId) : undefined;
+            if (!sMeta && gwToolCalls?.length) {
+              const toolKey = gwToolCalls.map((tc: ToolCall) => tc.name).sort().join(',');
+              if (toolKey) sMeta = serverMetaByText.get(toolKey);
+            }
 
             // ④ 从本地 IndexedDB 恢复
             const localTc = (msgId ? localToolCallsById.get(msgId) : undefined)
@@ -1796,11 +1906,48 @@ export const useChatStore = create<ChatState>((set, get) => {
               || (tcKey ? localThinkingByText.get(tcKey) : undefined);
             const localBlk = (msgId ? localBlocksById.get(msgId) : undefined)
               || (tcKey ? localBlocksByText.get(tcKey) : undefined);
+            const localSeqMeta = localAssistantMetaCandidates[localAssistantMetaIdx];
+            const canUseLocalSeqMeta = !!localSeqMeta
+              && !gwToolCalls
+              && !gwThinking
+              && !sMeta?.toolCalls
+              && !sMeta?.thinking
+              && !sMeta?.blocks
+              && !localTc
+              && !localThk
+              && !localBlk;
+            if (localSeqMeta) localAssistantMetaIdx++;
 
-            // 合并结果（优先级：Gateway 解析 > 服务端元数据 > 本地 DB）
-            toolCalls = gwToolCalls || sMeta?.toolCalls || localTc || undefined;
-            thinking = gwThinking || tagThinking || sMeta?.thinking || localThk || undefined;
-            blocks = gwBlocks || sMeta?.blocks || localBlk || undefined;
+            // 合并结果：
+            // toolCalls/thinking 优先使用更完整的数据；
+            // blocks 优先使用我们运行时持久化的真实时序，最后才回退到 Gateway 原始顺序。
+            toolCalls = sMeta?.toolCalls || localTc || gwToolCalls || (canUseLocalSeqMeta ? localSeqMeta.toolCalls : undefined) || undefined;
+            thinking = sMeta?.thinking || localThk || gwThinking || tagThinking || (canUseLocalSeqMeta ? localSeqMeta.thinking : undefined) || undefined;
+            blocks = sMeta?.blocks || localBlk || (canUseLocalSeqMeta ? localSeqMeta.blocks : undefined) || gwBlocks || undefined;
+
+            // ⑤ 兜底：当有 toolCalls 或 thinking 但无 blocks 时，构建合理的 blocks 顺序
+            // 确保使用交错渲染模式（而非传统模式将所有工具调用堆在顶部）
+            if (!blocks && (toolCalls?.length || thinking)) {
+              const fallbackBlocks: MessageBlock[] = [];
+              if (thinking) fallbackBlocks.push({ type: 'thinking', content: thinking });
+              if (toolCalls?.length) {
+                for (const tc of toolCalls) {
+                  fallbackBlocks.push({ type: 'tool', toolCallId: tc.id });
+                }
+              }
+              if (text) fallbackBlocks.push({ type: 'text', content: text });
+              blocks = fallbackBlocks;
+            }
+
+            // 如果已有 blocks 但缺少文本段，补一个 text block，避免渲染时回退到聚合 content
+            if (blocks && text && !blocks.some((b) => b.type === 'text' && b.content?.trim())) {
+              blocks = [...blocks, { type: 'text', content: text }];
+            }
+
+          }
+
+          if (!text && attachments.length === 0 && !toolCalls?.length && !thinking && !blocks?.length && !hasAssistantMetaContent(msg)) {
+            continue;
           }
 
           const finalMsgId = (msg.id as string) || uuid();
@@ -1876,7 +2023,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           }
         }
 
-        const sessions: Session[] = filteredSessions.map((s) => {
+        const sessionsFromGateway: Session[] = filteredSessions.map((s) => {
           // 标题优先级：本地DB > 服务端持久化 > Gateway返回 > lastMessage推断 > sessionKey解析
           let title = localTitleMap.get(s.key)
             || serverTitles[s.key]
@@ -1901,6 +2048,16 @@ export const useChatStore = create<ChatState>((set, get) => {
             updatedAt: s.updatedAt || Date.now(),
           };
         });
+
+        const optimisticSessions = [
+          ...state.sessions,
+          ...localSessions.filter((sess) => sess.key.includes(`:clawchat-${currentUserId}`)),
+        ].filter((sess, index, arr) => arr.findIndex((it) => it.key === sess.key) === index);
+
+        const sessions: Session[] = [
+          ...sessionsFromGateway,
+          ...optimisticSessions.filter((sess) => !sessionsFromGateway.some((item) => item.key === sess.key)),
+        ].sort((a, b) => b.updatedAt - a.updatedAt);
 
         // 对于仍然是"新对话"的会话，异步尝试从聊天记录生成标题
         for (const sess of sessions) {

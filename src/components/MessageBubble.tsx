@@ -222,11 +222,11 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
   // 计算 blocks 中未涵盖的剩余文本（blocks 中文本段的总长度 vs message.content）
   const remainingText = useMemo(() => {
-    if (!useBlocks || !blocksHasText || !message.content) return message.content || '';
-    // 如果 blocks 中有 text 类型，说明文本已被分段到 blocks 中
-    // 只在 blocks 不含 text 时使用 message.content 整体渲染
-    return '';
-  }, [useBlocks, blocksHasText, message.content]);
+    if (!message.content) return '';
+    // blocks 渲染模式下，始终以 blocks 为准，避免把聚合 content 再渲染一遍造成重复。
+    if (useBlocks) return '';
+    return message.content;
+  }, [useBlocks, message.content]);
 
   return (
     <>

@@ -65,7 +65,15 @@ export default function ChatPage() {
       el.scrollTop = el.scrollHeight;
       scrollRafRef.current = null;
     });
-  }, [messages, currentAiText, currentAiThinking, isStreaming]);
+  }, [
+    messages.length,
+    currentAiText,
+    currentAiThinking,
+    isStreaming,
+    currentBlocks.length,
+    toolCards.size,
+    currentAiMessageId,
+  ]);
 
   // 切换会话时强制滚到底部
   useEffect(() => {
