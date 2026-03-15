@@ -273,6 +273,13 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                     if (tc) {
                       return <ToolCallBlock key={`blk-tc-${block.toolCallId}`} toolCall={tc} />;
                     }
+                    // 兜底：blocks 中有工具引用但 toolCalls 中无详细数据
+                    return (
+                      <ToolCallBlock
+                        key={`blk-tc-${block.toolCallId}`}
+                        toolCall={{ id: block.toolCallId, name: 'tool', status: 'done' }}
+                      />
+                    );
                   }
                   if (block.type === 'text' && block.content) {
                     return (
