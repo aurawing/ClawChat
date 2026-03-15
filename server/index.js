@@ -55,6 +55,10 @@ if (!existsSync(ENV_PATH)) {
     '# OpenClaw Gateway 认证密码（优先于 token）',
     'OPENCLAW_GATEWAY_PASSWORD=',
     '',
+    '# 日志级别: error / warn / info / debug / trace',
+    '# trace 级别会打印与 Gateway 交互的所有完整 JSON 帧',
+    'LOG_LEVEL=info',
+    '',
   ].join('\n');
   writeFileSync(ENV_PATH, content, 'utf8');
   console.log('[INFO] 首次启动，已自动创建 server/.env 配置文件');
@@ -199,12 +203,20 @@ function saveDeviceToken(token) {
 }
 
 // ==================== 日志 ====================
+// ==================== 可配置日志 ====================
+// LOG_LEVEL: error < warn < info < debug < trace
+// trace 级别会打印与 Gateway 交互的完整 JSON 消息帧
+const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3, trace: 4 };
+const CURRENT_LOG_LEVEL = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LOG_LEVELS.info;
+
 const log = {
-  info: (msg, ...args) => console.log(`[INFO] ${new Date().toISOString()} ${msg}`, ...args),
-  warn: (msg, ...args) => console.warn(`[WARN] ${new Date().toISOString()} ${msg}`, ...args),
-  error: (msg, ...args) => console.error(`[ERROR] ${new Date().toISOString()} ${msg}`, ...args),
-  debug: (msg, ...args) => process.env.DEBUG && console.log(`[DEBUG] ${new Date().toISOString()} ${msg}`, ...args),
+  error: (msg, ...args) => CURRENT_LOG_LEVEL >= LOG_LEVELS.error && console.error(`[ERROR] ${new Date().toISOString()} ${msg}`, ...args),
+  warn:  (msg, ...args) => CURRENT_LOG_LEVEL >= LOG_LEVELS.warn  && console.warn(`[WARN] ${new Date().toISOString()} ${msg}`, ...args),
+  info:  (msg, ...args) => CURRENT_LOG_LEVEL >= LOG_LEVELS.info  && console.log(`[INFO] ${new Date().toISOString()} ${msg}`, ...args),
+  debug: (msg, ...args) => CURRENT_LOG_LEVEL >= LOG_LEVELS.debug && console.log(`[DEBUG] ${new Date().toISOString()} ${msg}`, ...args),
+  trace: (msg, ...args) => CURRENT_LOG_LEVEL >= LOG_LEVELS.trace && console.log(`[TRACE] ${new Date().toISOString()} ${msg}`, ...args),
 };
+log.info(`日志级别: ${Object.keys(LOG_LEVELS).find(k => LOG_LEVELS[k] === CURRENT_LOG_LEVEL) || 'info'} (设置 LOG_LEVEL 环境变量可调整: error/warn/info/debug/trace)`);
 
 // ==================== 常量 ====================
 const SCOPES = ['operator.admin', 'operator.approvals', 'operator.pairing', 'operator.read', 'operator.write'];
@@ -344,6 +356,7 @@ function handleGatewayMessage(rawData) {
   try { msg = JSON.parse(str); } catch { return; }
 
   log.debug(`GW ← type=${msg.type} event=${msg.event} id=${msg.id} state=${gw.state}`);
+  log.trace(`GW ← 完整帧:\n${JSON.stringify(msg, null, 2)}`);
 
   // ── 1. connect.challenge ──────────────────────────────────
   if (msg.type === 'event' && msg.event === 'connect.challenge') {
@@ -351,7 +364,9 @@ function handleGatewayMessage(rawData) {
     if (gw._connectTimer) { clearTimeout(gw._connectTimer); gw._connectTimer = null; }
     const nonce = msg.payload?.nonce || '';
     if (gw.ws?.readyState === WebSocket.OPEN) {
-      gw.ws.send(JSON.stringify(createConnectFrame(nonce)));
+      const frame = createConnectFrame(nonce);
+      log.trace(`GW → 完整帧 (connect-challenge):\n${JSON.stringify(frame, null, 2)}`);
+      gw.ws.send(JSON.stringify(frame));
     }
     return;
   }
@@ -562,7 +577,9 @@ function connectGateway() {
       gw._connectTimer = setTimeout(() => {
         if (gw.state === 'connecting') {
           log.info('未收到 challenge，直接发送 connect');
-          ws.send(JSON.stringify(createConnectFrame('')));
+          const frame = createConnectFrame('');
+          log.trace(`GW → 完整帧 (direct-connect):\n${JSON.stringify(frame, null, 2)}`);
+          ws.send(JSON.stringify(frame));
         }
       }, 500);
     });
@@ -734,6 +751,7 @@ function sendGatewayRPC(sid, method, params) {
     gw.pendingRequests.set(reqId, { sid, resolve, reject, timer });
     const frame = { type: 'req', id: reqId, method, params };
     log.debug(`RPC → [${sid?.slice(0, 8)}] ${method} id=${reqId}`);
+    log.trace(`GW → 完整帧 (RPC ${method}):\n${JSON.stringify(frame, null, 2)}`);
     gw.ws.send(JSON.stringify(frame));
   });
 }

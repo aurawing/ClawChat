@@ -28,7 +28,6 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
     setText('');
     setAttachments([]);
 
-    // 重置 textarea 高度
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
@@ -47,7 +46,6 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
   const handleTextChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       setText(e.target.value);
-      // 自适应高度
       const textarea = e.target;
       textarea.style.height = 'auto';
       textarea.style.height = Math.min(textarea.scrollHeight, 160) + 'px';
@@ -55,7 +53,6 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
     []
   );
 
-  // 相机拍照
   const handleCamera = useCallback(async () => {
     try {
       const photo = await Camera.getPhoto({
@@ -82,7 +79,6 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
     setShowAttachMenu(false);
   }, []);
 
-  // 相册选择
   const handleGallery = useCallback(async () => {
     try {
       const photo = await Camera.getPhoto({
@@ -108,7 +104,6 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
     setShowAttachMenu(false);
   }, []);
 
-  // 文件选择
   const handleFileSelect = useCallback(() => {
     fileInputRef.current?.click();
     setShowAttachMenu(false);
@@ -135,7 +130,6 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
       reader.readAsDataURL(file);
     });
 
-    // 清除 input 让同一文件可重复选
     e.target.value = '';
   }, []);
 
@@ -144,7 +138,7 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
   }, []);
 
   return (
-    <div className="border-t border-neutral-800 bg-neutral-950 px-3 py-3 safe-area-bottom">
+    <div className="border-t border-th-border-subtle bg-th-base px-3 py-3 safe-area-bottom">
       {/* 附件预览 */}
       {attachments.length > 0 && (
         <div className="flex gap-2 mb-2 overflow-x-auto pb-1">
@@ -154,17 +148,16 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
                 <img
                   src={att.url}
                   alt={att.name}
-                  className="h-16 w-16 rounded-lg object-cover border border-neutral-700"
+                  className="h-16 w-16 rounded-lg object-cover border border-th-border"
                 />
               ) : (
-                <div className="h-16 w-16 rounded-lg bg-neutral-800 border border-neutral-700 flex flex-col items-center justify-center p-1">
-                  <svg className="w-5 h-5 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="h-16 w-16 rounded-lg bg-th-elevated border border-th-border flex flex-col items-center justify-center p-1">
+                  <svg className="w-5 h-5 text-th-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
-                  <span className="text-[10px] text-neutral-400 truncate w-full text-center">{att.name}</span>
+                  <span className="text-[10px] text-th-text-muted truncate w-full text-center">{att.name}</span>
                 </div>
               )}
-              {/* 删除按钮 */}
               <button
                 onClick={() => removeAttachment(att.id)}
                 className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center text-white text-xs opacity-0 group-hover:opacity-100 transition-opacity"
@@ -182,7 +175,7 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
           <button
             onClick={() => setShowAttachMenu(!showAttachMenu)}
             disabled={disabled}
-            className="w-9 h-9 flex items-center justify-center text-neutral-400 hover:text-white transition-colors rounded-full hover:bg-neutral-800 disabled:opacity-50"
+            className="w-9 h-9 flex items-center justify-center text-th-text-muted hover:text-th-text transition-colors rounded-full hover:bg-th-elevated disabled:opacity-50"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -193,10 +186,10 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
           {showAttachMenu && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setShowAttachMenu(false)} />
-              <div className="absolute bottom-full left-0 mb-2 bg-neutral-800 rounded-xl shadow-xl border border-neutral-700 overflow-hidden z-20 min-w-[160px]">
+              <div className="absolute bottom-full left-0 mb-2 bg-th-elevated rounded-xl shadow-xl border border-th-border overflow-hidden z-20 min-w-[160px]">
                 <button
                   onClick={handleCamera}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-sm text-neutral-200 hover:bg-neutral-700 transition-colors"
+                  className="w-full flex items-center gap-3 px-4 py-3 text-sm text-th-text-secondary hover:bg-th-hover transition-colors"
                 >
                   <svg className="w-5 h-5 text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
@@ -206,7 +199,7 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
                 </button>
                 <button
                   onClick={handleGallery}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-sm text-neutral-200 hover:bg-neutral-700 transition-colors"
+                  className="w-full flex items-center gap-3 px-4 py-3 text-sm text-th-text-secondary hover:bg-th-hover transition-colors"
                 >
                   <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -215,7 +208,7 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
                 </button>
                 <button
                   onClick={handleFileSelect}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-sm text-neutral-200 hover:bg-neutral-700 transition-colors"
+                  className="w-full flex items-center gap-3 px-4 py-3 text-sm text-th-text-secondary hover:bg-th-hover transition-colors"
                 >
                   <svg className="w-5 h-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -236,7 +229,7 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
           placeholder="输入消息..."
           disabled={disabled}
           rows={1}
-          className="flex-1 bg-neutral-800 border border-neutral-700 rounded-2xl px-4 py-2.5 text-sm text-white placeholder-neutral-500 resize-none outline-none focus:border-neutral-600 transition-colors max-h-[160px] disabled:opacity-50"
+          className="flex-1 bg-th-input border border-th-border rounded-2xl px-4 py-2.5 text-sm text-th-text placeholder-th-text-dim resize-none outline-none focus:border-emerald-500/40 transition-colors max-h-[160px] disabled:opacity-50"
         />
 
         {/* 发送/停止按钮 */}
@@ -253,7 +246,7 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
           <button
             onClick={handleSend}
             disabled={disabled || (!text.trim() && attachments.length === 0)}
-            className="w-9 h-9 flex items-center justify-center bg-blue-600 hover:bg-blue-500 disabled:bg-neutral-700 disabled:text-neutral-500 rounded-full transition-colors shrink-0"
+            className="w-9 h-9 flex items-center justify-center bg-blue-600 hover:bg-blue-500 disabled:bg-th-elevated disabled:text-th-text-dim rounded-full transition-colors shrink-0"
           >
             <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M12 5l7 7-7 7" />

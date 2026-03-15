@@ -31,7 +31,6 @@ function SmartImage({
     if (retried) return;
     setRetried(true);
 
-    // 尝试通过 fetch（走 CapacitorHttp 原生通道）下载
     const httpUrl = att.url && (att.url.startsWith('http://') || att.url.startsWith('https://'))
       ? att.url : null;
     if (httpUrl) {
@@ -50,14 +49,12 @@ function SmartImage({
       } catch { /* continue to fallback */ }
     }
 
-    // 回退到 base64
     if (att.base64) {
       setSrc(`data:${att.type};base64,${att.base64}`);
     }
   }, [att, retried]);
 
   const handleClick = useCallback(() => {
-    // 传递实际加载成功的 src 给查看器
     if (onClickSrc) onClickSrc(src);
   }, [onClickSrc, src]);
 
@@ -76,11 +73,8 @@ function SmartImage({
 /** 获取初始图片 URL（跳过失效的 blob: URL） */
 function getInitialSrc(att: FileAttachment): string {
   const url = att.url;
-  // blob: URL 重启后失效，跳过
   if (url && !url.startsWith('blob:')) return url;
-  // 回退到 base64 data URL
   if (att.base64) return `data:${att.type};base64,${att.base64}`;
-  // 最后手段：即使 blob 也尝试
   return url || '';
 }
 
@@ -93,7 +87,6 @@ function formatTime(ts: number): string {
 
   const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 
-  // 今天只显示时分
   if (
     d.getFullYear() === now.getFullYear() &&
     d.getMonth() === now.getMonth() &&
@@ -102,7 +95,6 @@ function formatTime(ts: number): string {
     return hhmm;
   }
 
-  // 昨天
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   if (
@@ -113,12 +105,10 @@ function formatTime(ts: number): string {
     return `昨天 ${hhmm}`;
   }
 
-  // 今年只显示月-日 时:分
   if (d.getFullYear() === now.getFullYear()) {
     return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`;
   }
 
-  // 其他显示完整日期
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${hhmm}`;
 }
 
@@ -157,12 +147,12 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                     {att.type.startsWith('image/') ? (
                       <SmartImage
                         att={att}
-                        className="max-h-48 max-w-full rounded-xl border border-neutral-700 object-contain cursor-pointer active:opacity-80 transition-opacity"
+                        className="max-h-48 max-w-full rounded-xl border border-th-border object-contain cursor-pointer active:opacity-80 transition-opacity"
                         onClickSrc={(actualSrc) => setViewerSrc(actualSrc)}
                       />
                     ) : (
-                      <div className="flex items-center gap-2 bg-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-300 border border-neutral-700">
-                        <svg className="w-4 h-4 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <div className="flex items-center gap-2 bg-th-elevated rounded-lg px-3 py-2 text-xs text-th-text-muted border border-th-border">
+                        <svg className="w-4 h-4 text-th-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                         </svg>
                         <span className="truncate max-w-[150px]">{att.name}</span>
@@ -183,7 +173,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
           {/* 时间 */}
           {timeStr && (
-            <span className="text-[10px] text-neutral-500 mt-1 mr-1">{timeStr}</span>
+            <span className="text-[10px] text-th-text-dim mt-1 mr-1">{timeStr}</span>
           )}
         </div>
 
@@ -199,7 +189,6 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
   const hasToolCalls = message.toolCalls && message.toolCalls.length > 0;
   const isToolOnlyMsg = hasToolCalls && !message.content;
 
-  // 构建工具调用 ID → ToolCall 映射
   const toolCallMap = useMemo(() => {
     const map = new Map<string, ToolCall>();
     if (message.toolCalls) {
@@ -208,10 +197,8 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     return map;
   }, [message.toolCalls]);
 
-  // 判断是否使用交错渲染
   const useBlocks = message.blocks && message.blocks.length > 0 && hasToolCalls;
 
-  // 收集已被 blocks 引用的 toolCallId，剩余的在 blocks 之后渲染
   const blocksToolIds = useMemo(() => {
     if (!useBlocks) return new Set<string>();
     return new Set(
@@ -250,7 +237,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
         <div className="max-w-[85%]">
           <div className="space-y-1">
-            {/* ====== 交错渲染模式 — 思维链与工具调用按实际顺序展示 ====== */}
+            {/* ====== 交错渲染模式 ====== */}
             {useBlocks ? (
               <>
                 {message.blocks!.map((block: MessageBlock, i: number) => {
@@ -275,13 +262,12 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                   }
                   return null;
                 })}
-                {/* blocks 中未引用的工具调用（兼容旧数据） */}
                 {remainingTools.map((tc) => (
                   <ToolCallBlock key={`tc-rem-${tc.id}`} toolCall={tc} />
                 ))}
               </>
             ) : (
-              /* ====== 传统渲染模式（无 blocks 时回退） ====== */
+              /* ====== 传统渲染模式 ====== */
               <>
                 {message.thinking && (
                   <ThinkingBlock
@@ -300,7 +286,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
             {/* 主要内容 */}
             {message.content && (
               <div
-                className="text-neutral-100"
+                className="text-th-text"
                 onClick={(e) => {
                   const target = e.target as HTMLElement;
                   if (target.tagName === 'IMG') {
@@ -318,13 +304,13 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
 
             {/* 流式光标 */}
             {message.isStreaming && (
-              <span className="inline-block w-2 h-4 bg-neutral-400 animate-pulse ml-0.5" />
+              <span className="inline-block w-2 h-4 bg-th-text-muted animate-pulse ml-0.5" />
             )}
           </div>
 
           {/* 时间 */}
           {timeStr && !message.isStreaming && (
-            <span className="text-[10px] text-neutral-500 mt-1 block">{timeStr}</span>
+            <span className="text-[10px] text-th-text-dim mt-1 block">{timeStr}</span>
           )}
         </div>
       </div>

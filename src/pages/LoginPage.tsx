@@ -2,12 +2,14 @@ import { useState, useCallback, useEffect } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import { apiClient } from '../services/api-client';
 import type { ServerConfig } from '../types';
+import { useTheme } from '../hooks/useTheme';
 
 /**
  * 登录页面 - 输入服务器地址和连接密码
  */
 export default function LoginPage() {
   const { connect, connectionStatus, errorMessage } = useChatStore();
+  const { theme, toggleTheme } = useTheme();
 
   const [host, setHost] = useState(() => {
     try {
@@ -71,7 +73,24 @@ export default function LoginPage() {
   const showError = connectionStatus === 'error' || connectionStatus === 'auth_failed';
 
   return (
-    <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center p-6 safe-area-top safe-area-bottom">
+    <div className="min-h-screen bg-th-base flex flex-col items-center justify-center p-6 safe-area-top safe-area-bottom">
+      {/* 主题切换按钮 */}
+      <button
+        onClick={toggleTheme}
+        className="absolute top-4 right-4 w-9 h-9 flex items-center justify-center rounded-xl bg-th-elevated text-th-text-muted hover:text-th-text transition-colors safe-area-top"
+        title={theme === 'dark' ? '切换为浅色' : '切换为深色'}
+      >
+        {theme === 'dark' ? (
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+          </svg>
+        ) : (
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+          </svg>
+        )}
+      </button>
+
       {/* Logo */}
       <div className="mb-8 text-center">
         <img
@@ -79,32 +98,32 @@ export default function LoginPage() {
           alt="ClawChat"
           className="w-20 h-20 mx-auto mb-4 rounded-2xl shadow-lg shadow-emerald-500/20"
         />
-        <h1 className="text-2xl font-bold text-white">ClawChat</h1>
-        <p className="text-sm text-neutral-400 mt-1">连接到 OpenClaw 服务</p>
+        <h1 className="text-2xl font-bold text-th-text">ClawChat</h1>
+        <p className="text-sm text-th-text-muted mt-1">连接到 OpenClaw 服务</p>
       </div>
 
       {/* 表单 */}
       <div className="w-full max-w-sm space-y-4">
         {/* 服务器地址 */}
         <div>
-          <label className="block text-sm text-neutral-400 mb-1.5">服务器地址</label>
+          <label className="block text-sm text-th-text-muted mb-1.5">服务器地址</label>
           <input
             type="text"
             value={host}
             onChange={(e) => setHost(e.target.value)}
             placeholder="192.168.1.100:3210"
             disabled={isConnecting || isPairingPending}
-            className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
+            className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
             onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
           />
-          <p className="text-xs text-neutral-600 mt-1">
+          <p className="text-xs text-th-text-faint mt-1">
             IP 地址自动使用 http，域名自动使用 https
           </p>
         </div>
 
         {/* 连接密码 */}
         <div>
-          <label className="block text-sm text-neutral-400 mb-1.5">连接密码</label>
+          <label className="block text-sm text-th-text-muted mb-1.5">连接密码</label>
           <div className="relative">
             <input
               type={showToken ? 'text' : 'password'}
@@ -112,12 +131,12 @@ export default function LoginPage() {
               onChange={(e) => setToken(e.target.value)}
               placeholder="server/.env 中的 PROXY_TOKEN"
               disabled={isConnecting || isPairingPending}
-              className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 pr-11 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
+              className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 pr-11 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
               onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
             />
             <button
               onClick={() => setShowToken(!showToken)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-white transition-colors"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-th-text-dim hover:text-th-text transition-colors"
             >
               {showToken ? (
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -135,17 +154,17 @@ export default function LoginPage() {
 
         {/* 用户名 */}
         <div>
-          <label className="block text-sm text-neutral-400 mb-1.5">用户名 <span className="text-neutral-600 text-xs">(可选)</span></label>
+          <label className="block text-sm text-th-text-muted mb-1.5">用户名 <span className="text-th-text-faint text-xs">(可选)</span></label>
           <input
             type="text"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             placeholder="输入你的昵称，区分不同用户"
             disabled={isConnecting || isPairingPending}
-            className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-4 py-3 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
+            className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
             onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
           />
-          <p className="text-xs text-neutral-600 mt-1">
+          <p className="text-xs text-th-text-faint mt-1">
             多用户模式下用于标识身份，单用户可不填
           </p>
         </div>
@@ -155,7 +174,7 @@ export default function LoginPage() {
           <div className="space-y-2">
             <button
               disabled
-              className="w-full py-3 rounded-xl bg-neutral-700 text-white font-medium text-sm cursor-not-allowed"
+              className="w-full py-3 rounded-xl bg-th-elevated text-th-text font-medium text-sm cursor-not-allowed"
             >
               <span className="flex items-center justify-center gap-2">
                 <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -167,7 +186,7 @@ export default function LoginPage() {
             </button>
             <button
               onClick={handleStopReconnect}
-              className="w-full py-2 rounded-xl border border-neutral-700 text-neutral-400 hover:text-white hover:border-neutral-500 text-sm transition-colors"
+              className="w-full py-2 rounded-xl border border-th-border text-th-text-muted hover:text-th-text hover:border-th-text-dim text-sm transition-colors"
             >
               取消
             </button>
@@ -239,7 +258,7 @@ export default function LoginPage() {
       </div>
 
       {/* 底部提示 */}
-      <div className="text-xs text-neutral-600 mt-8 text-center space-y-1">
+      <div className="text-xs text-th-text-faint mt-8 text-center space-y-1">
         <p>兼容 qingchencloud/clawapp 协议</p>
         <p>SSE+POST 架构 · Ed25519 设备签名</p>
       </div>

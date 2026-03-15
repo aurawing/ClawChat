@@ -3,6 +3,7 @@ import { useChatStore } from '../stores/chatStore';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import SessionList from '../components/SessionList';
+import { useTheme } from '../hooks/useTheme';
 import type { FileAttachment, Message, ServerConfig } from '../types';
 
 /**
@@ -36,16 +37,55 @@ export default function ChatPage() {
     connect,
   } = useChatStore();
 
+  const { theme, toggleTheme } = useTheme();
   const [showSidebar, setShowSidebar] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isUserNearBottomRef = useRef(true);
+  const scrollRafRef = useRef<number | null>(null);
 
-  // 自动滚动到底部
+  // 检测用户是否在底部附近（80px 阈值）
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const threshold = 80;
+    isUserNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+  }, []);
+
+  // 自动滚动到底部 — 仅当用户在底部时触发，使用 rAF 避免抖动
   useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages, currentAiText, isStreaming]);
+    if (!isUserNearBottomRef.current) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+
+    if (scrollRafRef.current) cancelAnimationFrame(scrollRafRef.current);
+    scrollRafRef.current = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+      scrollRafRef.current = null;
+    });
+  }, [messages, currentAiText, currentAiThinking, isStreaming]);
+
+  // 切换会话时强制滚到底部
+  useEffect(() => {
+    isUserNearBottomRef.current = true;
+    const el = scrollContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [currentSessionKey]);
+
+  // 主题切换时更新原生 StatusBar
+  useEffect(() => {
+    (async () => {
+      try {
+        const { Capacitor } = await import('@capacitor/core');
+        if (!Capacitor.isNativePlatform()) return;
+        const { StatusBar, Style } = await import('@capacitor/status-bar');
+        const isDark = theme === 'dark';
+        await StatusBar.setStyle({ style: isDark ? Style.Dark : Style.Light });
+        await StatusBar.setBackgroundColor({ color: isDark ? '#0a0a0a' : '#ffffff' });
+      } catch { /* ignore */ }
+    })();
+  }, [theme]);
 
   const handleSend = useCallback(
     (content: string, attachments?: FileAttachment[]) => {
@@ -54,11 +94,10 @@ export default function ChatPage() {
     [sendMessage]
   );
 
-  // 构造显示用的消息列表（包含流式中的 AI 消息和工具调用）
+  // 构造显示用的消息列表
   const displayMessages = [...messages];
   const hasToolCards = toolCards.size > 0;
 
-  // 实时快照 blocks（补全最后一个 thinking 段）
   const liveBlocks = (() => {
     if (!currentBlocks.length && !currentAiThinking) return undefined;
     const blocks = [...currentBlocks];
@@ -73,7 +112,6 @@ export default function ChatPage() {
     return blocks.length > 0 ? blocks : undefined;
   })();
 
-  // 有文本或有工具调用或有思考时，显示流式 AI 消息
   if (currentAiText || hasToolCards || currentAiThinking) {
     const msgId = currentAiMessageId || 'ai-streaming';
     const existing = displayMessages.find((m) => m.id === msgId);
@@ -103,15 +141,13 @@ export default function ChatPage() {
     }
   }
 
-  // 是否显示"思考中"占位符：正在等待但还没有文本也没有工具调用
   const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiThinking && !currentAiMessageId;
 
-  // 当前会话标题：优先使用 sessions 列表中的 AI 生成标题，回退到 sessionKey 解析
   const currentSession = sessions.find((s) => s.key === currentSessionKey);
   const currentTitle = currentSession?.title || (currentSessionKey ? extractTitle(currentSessionKey) : 'ClawChat');
 
   return (
-    <div className="h-screen flex bg-neutral-950">
+    <div className="h-screen flex bg-th-base">
       {/* 侧边栏遮罩 */}
       {showSidebar && (
         <div
@@ -148,11 +184,11 @@ export default function ChatPage() {
       {/* 主聊天区域 */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* 顶栏 */}
-        <div className="flex items-center px-4 py-3 border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-sm safe-area-top">
+        <div className="flex items-center px-4 py-3 border-b border-th-border-subtle bg-th-base/80 backdrop-blur-sm safe-area-top">
           {/* 菜单按钮 */}
           <button
             onClick={() => setShowSidebar(true)}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-neutral-400 mr-3 lg:hidden"
+            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted mr-3 lg:hidden"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
@@ -161,7 +197,7 @@ export default function ChatPage() {
 
           {/* 标题 */}
           <div className="flex-1 min-w-0">
-            <h1 className="text-sm font-medium text-white truncate">
+            <h1 className="text-sm font-medium text-th-text truncate">
               {currentTitle}
             </h1>
             <div className="flex items-center gap-1.5 mt-0.5">
@@ -174,7 +210,7 @@ export default function ChatPage() {
                     : 'bg-red-500'
                 }`}
               />
-              <span className="text-xs text-neutral-500">
+              <span className="text-xs text-th-text-dim">
                 {connectionStatus === 'ready' || connectionStatus === 'connected'
                   ? (username ? `${username} · 已连接` : '已连接')
                   : connectionStatus === 'connecting' || connectionStatus === 'reconnecting'
@@ -189,17 +225,33 @@ export default function ChatPage() {
             {/* 新建会话 */}
             <button
               onClick={createNewSession}
-              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-emerald-400"
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-emerald-400"
               title="新建对话"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
               </svg>
             </button>
+            {/* 主题切换 */}
+            <button
+              onClick={toggleTheme}
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
+              title={theme === 'dark' ? '切换为浅色' : '切换为深色'}
+            >
+              {theme === 'dark' ? (
+                <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+              ) : (
+                <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                </svg>
+              )}
+            </button>
             {/* 设置 */}
             <button
               onClick={() => setShowSettings(true)}
-              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-neutral-400"
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
               title="连接设置"
             >
               <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -210,7 +262,7 @@ export default function ChatPage() {
             {/* 断开连接 */}
             <button
               onClick={disconnect}
-              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-neutral-400"
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
               title="断开连接"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -221,7 +273,7 @@ export default function ChatPage() {
         </div>
 
         {/* 消息区域 */}
-        <div className="flex-1 overflow-y-auto px-4 py-4">
+        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4">
           {displayMessages.length === 0 && !showThinkingPlaceholder ? (
             <EmptyState />
           ) : (
@@ -303,13 +355,13 @@ function SettingsModal({
       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
 
       {/* 弹窗 */}
-      <div className="relative bg-neutral-900 border border-neutral-700 rounded-2xl w-full max-w-sm shadow-2xl animate-fadeIn">
+      <div className="relative bg-th-surface border border-th-border rounded-2xl w-full max-w-sm shadow-2xl animate-fadeIn">
         {/* 标题 */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-800">
-          <h3 className="text-base font-semibold text-white">连接设置</h3>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-th-border-subtle">
+          <h3 className="text-base font-semibold text-th-text">连接设置</h3>
           <button
             onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition-colors"
+            className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-th-elevated text-th-text-muted hover:text-th-text transition-colors"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -319,33 +371,31 @@ function SettingsModal({
 
         {/* 表单 */}
         <div className="px-5 py-4 space-y-4">
-          {/* 服务器地址 */}
           <div>
-            <label className="block text-sm text-neutral-400 mb-1.5">服务器地址</label>
+            <label className="block text-sm text-th-text-muted mb-1.5">服务器地址</label>
             <input
               type="text"
               value={host}
               onChange={(e) => setHost(e.target.value)}
               placeholder="192.168.1.100:3210"
-              className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-4 py-2.5 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors"
+              className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
             />
-            <p className="text-xs text-neutral-600 mt-1">IP 自动 http，域名自动 https</p>
+            <p className="text-xs text-th-text-faint mt-1">IP 自动 http，域名自动 https</p>
           </div>
 
-          {/* 连接密码 */}
           <div>
-            <label className="block text-sm text-neutral-400 mb-1.5">连接密码</label>
+            <label className="block text-sm text-th-text-muted mb-1.5">连接密码</label>
             <div className="relative">
               <input
                 type={showToken ? 'text' : 'password'}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
                 placeholder="PROXY_TOKEN"
-                className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-4 py-2.5 pr-11 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors"
+                className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 pr-11 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
               />
               <button
                 onClick={() => setShowToken(!showToken)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-white transition-colors"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-th-text-dim hover:text-th-text transition-colors"
               >
                 {showToken ? (
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -361,26 +411,25 @@ function SettingsModal({
             </div>
           </div>
 
-          {/* 用户名 */}
           <div>
-            <label className="block text-sm text-neutral-400 mb-1.5">
-              用户名 <span className="text-neutral-600 text-xs">(可选)</span>
+            <label className="block text-sm text-th-text-muted mb-1.5">
+              用户名 <span className="text-th-text-faint text-xs">(可选)</span>
             </label>
             <input
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="昵称，区分不同用户"
-              className="w-full bg-neutral-800 border border-neutral-700 rounded-xl px-4 py-2.5 text-white text-sm placeholder-neutral-500 outline-none focus:border-emerald-500/50 transition-colors"
+              className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
             />
           </div>
         </div>
 
         {/* 操作按钮 */}
-        <div className="flex gap-3 px-5 py-4 border-t border-neutral-800">
+        <div className="flex gap-3 px-5 py-4 border-t border-th-border-subtle">
           <button
             onClick={onClose}
-            className="flex-1 py-2.5 rounded-xl border border-neutral-700 text-neutral-300 text-sm hover:bg-neutral-800 transition-colors"
+            className="flex-1 py-2.5 rounded-xl border border-th-border text-th-text-secondary text-sm hover:bg-th-elevated transition-colors"
           >
             取消
           </button>
@@ -404,18 +453,13 @@ function extractTitle(key: string): string {
     const channel = parts.slice(2).join(':');
 
     let label: string;
-    // clawchat-{user} 格式: 主对话
     if (/^clawchat-[^-]+$/.test(channel)) {
       label = '主对话';
-    }
-    // clawchat-{user}-{suffix} 格式: 新对话
-    else if (/^clawchat-.+-.+$/.test(channel)) {
+    } else if (/^clawchat-.+-.+$/.test(channel)) {
       label = '新对话';
-    }
-    else if (channel === 'main') {
+    } else if (channel === 'main') {
       label = '主对话';
-    }
-    else {
+    } else {
       label = channel;
     }
 
@@ -456,17 +500,16 @@ function AbortedActions({ onResend, onDelete }: { onResend: () => void; onDelete
 function ThinkingPlaceholder() {
   return (
     <div className="flex justify-start mb-4">
-      {/* AI 头像 */}
       <div className="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center mr-2 mt-1 shrink-0">
         <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
         </svg>
       </div>
-      <div className="bg-neutral-800/60 rounded-2xl rounded-tl-md px-4 py-3">
+      <div className="bg-th-elevated/60 rounded-2xl rounded-tl-md px-4 py-3">
         <div className="flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full bg-neutral-400 animate-bounce" style={{ animationDelay: '0ms' }} />
-          <span className="w-2 h-2 rounded-full bg-neutral-400 animate-bounce" style={{ animationDelay: '150ms' }} />
-          <span className="w-2 h-2 rounded-full bg-neutral-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+          <span className="w-2 h-2 rounded-full bg-th-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
+          <span className="w-2 h-2 rounded-full bg-th-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
+          <span className="w-2 h-2 rounded-full bg-th-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
         </div>
       </div>
     </div>
@@ -482,8 +525,8 @@ function EmptyState() {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
         </svg>
       </div>
-      <h2 className="text-lg font-semibold text-white mb-2">欢迎使用 ClawChat</h2>
-      <p className="text-sm text-neutral-400 mb-6 max-w-xs">
+      <h2 className="text-lg font-semibold text-th-text mb-2">欢迎使用 ClawChat</h2>
+      <p className="text-sm text-th-text-muted mb-6 max-w-xs">
         已连接 OpenClaw 智能体，发送消息开始对话。支持流式输出、工具调用、文件上传。
       </p>
     </div>

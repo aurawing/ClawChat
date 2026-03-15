@@ -70,23 +70,21 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
       ? ((toolCall.finishedAt - toolCall.startedAt) / 1000).toFixed(1) + 's'
       : null;
 
-  // 输入预览（截取前 80 字符）
   const inputPreview = truncate(toolCall.input, 80);
 
   return (
     <div className={`rounded-lg border text-xs overflow-hidden ${
-      isRunning ? 'bg-neutral-800/60 border-amber-500/30' :
-      isError ? 'bg-neutral-800/60 border-red-500/30' :
-      'bg-neutral-800/40 border-neutral-700/40'
+      isRunning ? 'bg-th-elevated/60 border-amber-500/30' :
+      isError ? 'bg-th-elevated/60 border-red-500/30' :
+      'bg-th-elevated/40 border-th-border/40'
     }`}>
       {/* 头部 — 可折叠 */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-white/5 transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-th-hover/30 transition-colors"
       >
-        {/* 状态指示 */}
         <span className={`flex items-center justify-center w-5 h-5 rounded shrink-0 ${
-          isRunning ? 'bg-amber-500/20' : isError ? 'bg-red-500/20' : 'bg-neutral-700/50'
+          isRunning ? 'bg-amber-500/20' : isError ? 'bg-red-500/20' : 'bg-th-elevated/50'
         }`}>
           {isRunning ? (
             <svg className="w-3 h-3 animate-spin text-amber-400" fill="none" viewBox="0 0 24 24">
@@ -100,15 +98,13 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
           )}
         </span>
 
-        {/* 工具名 + 输入预览 */}
         <span className="flex-1 text-left truncate">
-          <span className="font-mono text-neutral-300">{toolCall.name}</span>
+          <span className="font-mono text-th-text-secondary">{toolCall.name}</span>
           {inputPreview && !isExpanded && (
-            <span className="text-neutral-500 ml-1.5">{inputPreview}</span>
+            <span className="text-th-text-dim ml-1.5">{inputPreview}</span>
           )}
         </span>
 
-        {/* 状态 + 耗时 */}
         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${
           isRunning ? 'bg-amber-500/15 text-amber-400' :
           isError ? 'bg-red-500/15 text-red-400' :
@@ -117,9 +113,8 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
           {isRunning ? '执行中…' : isError ? '失败' : duration || '✓'}
         </span>
 
-        {/* 展开箭头 */}
         <svg
-          className={`w-3 h-3 text-neutral-500 transition-transform shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
+          className={`w-3 h-3 text-th-text-dim transition-transform shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
           fill="none" viewBox="0 0 24 24" stroke="currentColor"
         >
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
@@ -128,23 +123,23 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
 
       {/* 展开详情 */}
       {isExpanded && (
-        <div className="border-t border-neutral-700/40 px-3 py-2 space-y-2">
+        <div className="border-t border-th-border/40 px-3 py-2 space-y-2">
           {toolCall.input && (
             <div>
-              <div className="text-neutral-500 mb-0.5 flex items-center gap-1">
+              <div className="text-th-text-dim mb-0.5 flex items-center gap-1">
                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
                 </svg>
                 输入
               </div>
-              <pre className="bg-black/30 rounded px-2 py-1.5 text-neutral-400 overflow-x-auto whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
+              <pre className="bg-th-base/50 rounded px-2 py-1.5 text-th-text-muted overflow-x-auto whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
                 {truncate(toolCall.input, 2000)}
               </pre>
             </div>
           )}
           {toolCall.output && (
             <div>
-              <div className={`mb-0.5 flex items-center justify-between ${isError ? 'text-red-400' : 'text-neutral-500'}`}>
+              <div className={`mb-0.5 flex items-center justify-between ${isError ? 'text-red-400' : 'text-th-text-dim'}`}>
                 <div className="flex items-center gap-1">
                   <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 17l-5-5m0 0l5-5m-5 5h12" />
@@ -157,7 +152,7 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
                       e.stopPropagation();
                       navigator.clipboard.writeText(toolCall.output || '');
                     }}
-                    className="text-neutral-500 hover:text-neutral-300"
+                    className="text-th-text-dim hover:text-th-text-secondary"
                     title="复制"
                   >
                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -167,27 +162,27 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
                 </div>
               </div>
               <pre className={`rounded px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all max-h-40 overflow-y-auto ${
-                isError ? 'bg-red-500/10 text-red-300' : 'bg-black/30 text-neutral-400'
+                isError ? 'bg-red-500/10 text-red-300' : 'bg-th-base/50 text-th-text-muted'
               }`}>
                 {truncate(toolCall.output, 2000)}
               </pre>
             </div>
           )}
           {!toolCall.input && !toolCall.output && (
-            <div className="text-neutral-500 space-y-1">
+            <div className="text-th-text-dim space-y-1">
               <div>
-                <span className="text-neutral-600">工具: </span>
-                <span className="font-mono text-neutral-400">{toolCall.name}</span>
+                <span className="text-th-text-faint">工具: </span>
+                <span className="font-mono text-th-text-muted">{toolCall.name}</span>
               </div>
               <div>
-                <span className="text-neutral-600">ID: </span>
-                <span className="font-mono text-neutral-500 text-[10px]">{toolCall.id}</span>
+                <span className="text-th-text-faint">ID: </span>
+                <span className="font-mono text-th-text-dim text-[10px]">{toolCall.id}</span>
               </div>
               {toolCall.status === 'running' && (
                 <div className="text-amber-400/70 text-[10px]">等待执行结果…</div>
               )}
               {toolCall.status === 'done' && (
-                <div className="text-neutral-600 text-[10px]">（工具未返回详细的输入/输出数据）</div>
+                <div className="text-th-text-faint text-[10px]">（工具未返回详细的输入/输出数据）</div>
               )}
             </div>
           )}
@@ -207,13 +202,12 @@ export function ToolCallGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
   const runningCount = toolCalls.filter((tc) => tc.status === 'running').length;
 
   return (
-    <div className="my-2 rounded-xl border border-neutral-700/50 bg-neutral-900/50 overflow-hidden">
+    <div className="my-2 rounded-xl border border-th-border/50 bg-th-surface/50 overflow-hidden">
       {/* 组头部 */}
       <button
         onClick={() => setCollapsed(!collapsed)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-white/5 transition-colors text-xs"
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-th-hover/30 transition-colors text-xs"
       >
-        {/* 齿轮图标 */}
         <div className={`w-5 h-5 rounded flex items-center justify-center shrink-0 ${
           runningCount > 0 ? 'bg-amber-500/20' : hasError ? 'bg-red-500/20' : 'bg-emerald-500/15'
         }`}>
@@ -236,19 +230,19 @@ export function ToolCallGroup({ toolCalls }: { toolCalls: ToolCall[] }) {
           ) : hasError ? (
             <span className="text-red-400">调用了 {toolCalls.length} 个工具（有失败）</span>
           ) : (
-            <span className="text-neutral-400">调用了 {toolCalls.length} 个工具{allDone ? ' ✓' : ''}</span>
+            <span className="text-th-text-muted">调用了 {toolCalls.length} 个工具{allDone ? ' ✓' : ''}</span>
           )}
         </span>
 
         <svg
-          className={`w-3 h-3 text-neutral-500 transition-transform ${collapsed ? '-rotate-90' : ''}`}
+          className={`w-3 h-3 text-th-text-dim transition-transform ${collapsed ? '-rotate-90' : ''}`}
           fill="none" viewBox="0 0 24 24" stroke="currentColor"
         >
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
 
-      {/* 工具调用列表 — 竖线时间线 */}
+      {/* 工具调用列表 */}
       {!collapsed && (
         <div className="px-3 pb-2 space-y-1.5">
           {toolCalls.map((tc) => (

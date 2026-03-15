@@ -51,14 +51,13 @@ function CodeBlock({ className, children }: { className?: string; children: Reac
   }, [text, lang]);
 
   return (
-    <div className="relative group my-3 rounded-xl overflow-hidden bg-neutral-900 border border-neutral-800">
-      <div className="flex items-center justify-between px-4 py-2 bg-neutral-800/50 text-xs text-neutral-400">
+    <div className="relative group my-3 rounded-xl overflow-hidden bg-th-code border border-th-border-subtle">
+      <div className="flex items-center justify-between px-4 py-2 bg-th-code-header text-xs text-th-text-muted">
         <span>{lang || 'code'}</span>
         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-          {/* 下载按钮 */}
           <button
             onClick={handleDownload}
-            className="flex items-center gap-1 text-neutral-400 hover:text-white transition-colors"
+            className="flex items-center gap-1 text-th-text-muted hover:text-th-text transition-colors"
             title="下载为文件"
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -66,10 +65,9 @@ function CodeBlock({ className, children }: { className?: string; children: Reac
             </svg>
             下载
           </button>
-          {/* 复制按钮 */}
           <button
             onClick={handleCopy}
-            className="text-neutral-400 hover:text-white transition-colors"
+            className="text-th-text-muted hover:text-th-text transition-colors"
           >
             {copied ? '✓ 已复制' : '复制'}
           </button>
@@ -84,55 +82,60 @@ function CodeBlock({ className, children }: { className?: string; children: Reac
 
 export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
   return (
-    <div className="markdown-body prose prose-invert prose-sm max-w-none">
+    <div className="markdown-body prose prose-sm max-w-none">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight, rehypeRaw]}
         components={{
-          // 自定义代码块渲染
           code({ className, children, ...props }) {
             const isInline = !className;
             if (isInline) {
               return (
-                <code className="bg-neutral-800 px-1.5 py-0.5 rounded text-sm text-emerald-300" {...props}>
+                <code
+                  className="px-1.5 py-0.5 rounded text-sm"
+                  style={{
+                    backgroundColor: 'var(--cc-code-inline-bg)',
+                    color: 'var(--cc-code-inline-text)',
+                  }}
+                  {...props}
+                >
                   {children}
                 </code>
               );
             }
             return <CodeBlock className={className}>{children}</CodeBlock>;
           },
-          // 自定义链接 - 新窗口打开
           a({ children, href, ...props }) {
             return (
               <a
                 href={href}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-blue-400 hover:text-blue-300 underline"
+                style={{ color: 'var(--cc-link-color)' }}
+                className="hover:opacity-80 underline"
                 {...props}
               >
                 {children}
               </a>
             );
           },
-          // 表格样式
           table({ children }) {
             return (
               <div className="overflow-x-auto my-3">
-                <table className="min-w-full border border-neutral-700 text-sm">{children}</table>
+                <table className="min-w-full border border-th-border text-sm">{children}</table>
               </div>
             );
           },
           th({ children }) {
             return (
-              <th className="px-3 py-2 bg-neutral-800 border border-neutral-700 text-left font-medium">
+              <th className="px-3 py-2 bg-th-code border border-th-border text-left font-medium">
                 {children}
               </th>
             );
           },
           td({ children }) {
             return (
-              <td className="px-3 py-2 border border-neutral-700">{children}</td>
+              <td className="px-3 py-2 border border-th-border">{children}</td>
             );
           },
         }}

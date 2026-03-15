@@ -46,15 +46,15 @@ export default function SessionList({
   };
 
   return (
-    <div className="h-full flex flex-col bg-neutral-900">
+    <div className="h-full flex flex-col bg-th-surface">
       {/* 头部 */}
-      <div className="flex items-center justify-between px-4 py-4 border-b border-neutral-800 safe-area-top">
-        <h2 className="text-lg font-semibold text-white">会话</h2>
+      <div className="flex items-center justify-between px-4 py-4 border-b border-th-border-subtle safe-area-top">
+        <h2 className="text-lg font-semibold text-th-text">会话</h2>
         <div className="flex gap-2">
           {/* 新建会话按钮 */}
           <button
             onClick={onNewSession}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-emerald-400"
+            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-emerald-400"
             title="新建对话"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -64,7 +64,7 @@ export default function SessionList({
           {/* 刷新按钮 */}
           <button
             onClick={onRefresh}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-neutral-400"
+            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
             title="刷新会话列表"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -73,7 +73,7 @@ export default function SessionList({
           </button>
           <button
             onClick={onClose}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-neutral-400 lg:hidden"
+            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted lg:hidden"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -85,7 +85,7 @@ export default function SessionList({
       {/* 会话列表 */}
       <div className="flex-1 overflow-y-auto">
         {sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-neutral-500">
+          <div className="flex flex-col items-center justify-center h-full text-th-text-dim">
             <svg className="w-12 h-12 mb-3 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
             </svg>
@@ -110,22 +110,22 @@ export default function SessionList({
 
       {/* 底部用户信息 */}
       {(username || onDisconnect) && (
-        <div className="border-t border-neutral-800 px-4 py-3 safe-area-bottom">
+        <div className="border-t border-th-border-subtle px-4 py-3 safe-area-bottom">
           <div className="flex items-center gap-3">
             {/* 用户头像 */}
             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white text-xs font-bold shrink-0">
               {username ? username.charAt(0).toUpperCase() : '?'}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm text-neutral-200 truncate">
+              <p className="text-sm text-th-text-secondary truncate">
                 {username || '未命名用户'}
               </p>
-              <p className="text-xs text-neutral-500">已连接</p>
+              <p className="text-xs text-th-text-dim">已连接</p>
             </div>
             {onDisconnect && (
               <button
                 onClick={onDisconnect}
-                className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-neutral-800 transition-colors text-neutral-500 hover:text-red-400"
+                className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-dim hover:text-red-400"
                 title="断开连接"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -166,7 +166,6 @@ function SessionItem({
   const handleTouchEnd = (e: React.TouchEvent) => {
     const deltaX = e.changedTouches[0].clientX - touchStartX.current;
     const deltaY = Math.abs(e.changedTouches[0].clientY - touchStartY.current);
-    // 水平滑动超过 60px 且垂直滑动不超过 30px
     if (deltaX < -60 && deltaY < 30) {
       setShowDelete(true);
     } else if (deltaX > 40) {
@@ -203,7 +202,7 @@ function SessionItem({
       {/* 会话内容 */}
       <div
         className={`flex items-center px-3 py-3 cursor-pointer transition-all duration-200 ${
-          isCurrent ? 'bg-neutral-800' : 'hover:bg-neutral-800/50 bg-neutral-900'
+          isCurrent ? 'bg-th-elevated' : 'hover:bg-th-hover bg-th-surface'
         } ${showDelete ? '-translate-x-16' : 'translate-x-0'}`}
         onClick={() => {
           if (showDelete) {
@@ -214,13 +213,13 @@ function SessionItem({
         }}
       >
         <div className="flex-1 min-w-0">
-          <p className="text-sm text-neutral-200 truncate">{session.title}</p>
+          <p className="text-sm text-th-text-secondary truncate">{session.title}</p>
           {session.lastMessage && (
-            <p className="text-xs text-neutral-500 truncate mt-0.5">{session.lastMessage}</p>
+            <p className="text-xs text-th-text-dim truncate mt-0.5">{session.lastMessage}</p>
           )}
         </div>
         <div className="flex items-center gap-2 ml-2 shrink-0">
-          <span className="text-xs text-neutral-600">{formatTime(session.updatedAt)}</span>
+          <span className="text-xs text-th-text-faint">{formatTime(session.updatedAt)}</span>
           {/* 桌面端 hover 显示删除 */}
           <button
             onClick={(e) => {
@@ -229,7 +228,7 @@ function SessionItem({
                 onDelete();
               }
             }}
-            className="w-6 h-6 hidden lg:flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/20 text-neutral-500 hover:text-red-400 transition-all"
+            className="w-6 h-6 hidden lg:flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-red-500/20 text-th-text-dim hover:text-red-400 transition-all"
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />

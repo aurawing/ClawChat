@@ -1,6 +1,96 @@
 @import "tailwindcss";
 @import "highlight.js/styles/github-dark.css";
 
+/* ===== 主题色变量 ===== */
+/* 浅色主题（默认 .light） */
+:root, :root.light {
+  --cc-bg-base: #ffffff;
+  --cc-bg-surface: #f5f5f5;
+  --cc-bg-elevated: #e8e8e8;
+  --cc-bg-hover: #e0e0e0;
+  --cc-bg-input: #ffffff;
+  --cc-bg-bubble-ai: rgba(0, 0, 0, 0.04);
+  --cc-bg-code: #f3f4f6;
+  --cc-bg-code-header: #e5e7eb;
+
+  --cc-text-primary: #111111;
+  --cc-text-secondary: #374151;
+  --cc-text-muted: #6b7280;
+  --cc-text-dim: #9ca3af;
+  --cc-text-faint: #d1d5db;
+
+  --cc-border: #e5e7eb;
+  --cc-border-subtle: #f3f4f6;
+
+  --cc-scrollbar-thumb: rgba(0, 0, 0, 0.12);
+  --cc-scrollbar-hover: rgba(0, 0, 0, 0.2);
+
+  --cc-code-inline-bg: #e5e7eb;
+  --cc-code-inline-text: #059669;
+  --cc-blockquote-border: rgba(0, 0, 0, 0.15);
+  --cc-blockquote-text: #6b7280;
+  --cc-hr-color: rgba(0, 0, 0, 0.08);
+  --cc-link-color: #2563eb;
+  --cc-link-hover: #1d4ed8;
+  --cc-table-header: #f3f4f6;
+  --cc-table-border: #e5e7eb;
+}
+
+/* 深色主题 */
+:root.dark {
+  --cc-bg-base: #0a0a0a;
+  --cc-bg-surface: #171717;
+  --cc-bg-elevated: #262626;
+  --cc-bg-hover: #333333;
+  --cc-bg-input: #262626;
+  --cc-bg-bubble-ai: rgba(255, 255, 255, 0.04);
+  --cc-bg-code: #171717;
+  --cc-bg-code-header: rgba(38, 38, 38, 0.5);
+
+  --cc-text-primary: #ffffff;
+  --cc-text-secondary: #e5e5e5;
+  --cc-text-muted: #a3a3a3;
+  --cc-text-dim: #737373;
+  --cc-text-faint: #525252;
+
+  --cc-border: #404040;
+  --cc-border-subtle: #262626;
+
+  --cc-scrollbar-thumb: rgba(255, 255, 255, 0.1);
+  --cc-scrollbar-hover: rgba(255, 255, 255, 0.2);
+
+  --cc-code-inline-bg: #262626;
+  --cc-code-inline-text: #6ee7b7;
+  --cc-blockquote-border: rgba(255, 255, 255, 0.2);
+  --cc-blockquote-text: rgba(255, 255, 255, 0.6);
+  --cc-hr-color: rgba(255, 255, 255, 0.1);
+  --cc-link-color: #60a5fa;
+  --cc-link-hover: #93bbfd;
+  --cc-table-header: #262626;
+  --cc-table-border: #404040;
+}
+
+/* 注册为 Tailwind 主题色 —— 使组件可用 bg-th-base / text-th-primary 等 */
+@theme {
+  --color-th-base: var(--cc-bg-base);
+  --color-th-surface: var(--cc-bg-surface);
+  --color-th-elevated: var(--cc-bg-elevated);
+  --color-th-hover: var(--cc-bg-hover);
+  --color-th-input: var(--cc-bg-input);
+  --color-th-bubble-ai: var(--cc-bg-bubble-ai);
+  --color-th-code: var(--cc-bg-code);
+  --color-th-code-header: var(--cc-bg-code-header);
+
+  --color-th-text: var(--cc-text-primary);
+  --color-th-text-secondary: var(--cc-text-secondary);
+  --color-th-text-muted: var(--cc-text-muted);
+  --color-th-text-dim: var(--cc-text-dim);
+  --color-th-text-faint: var(--cc-text-faint);
+
+  --color-th-border: var(--cc-border);
+  --color-th-border-subtle: var(--cc-border-subtle);
+}
+
 /* ===== 全局基础样式 ===== */
 * {
   -webkit-tap-highlight-color: transparent;
@@ -9,8 +99,11 @@
 
 html, body, #root {
   height: 100%;
-  height: 100dvh; /* 动态视口高度，排除系统栏 */
+  height: 100dvh;
   overflow: hidden;
+  background-color: var(--cc-bg-base);
+  color: var(--cc-text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 body {
@@ -38,18 +131,19 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--cc-scrollbar-thumb);
   border-radius: 2px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--cc-scrollbar-hover);
 }
 
 /* ===== Markdown 内容样式 ===== */
 .markdown-body {
   line-height: 1.7;
   word-wrap: break-word;
+  color: var(--cc-text-primary);
 }
 
 .markdown-body p {
@@ -71,10 +165,10 @@ body {
 }
 
 .markdown-body blockquote {
-  border-left: 3px solid rgba(255, 255, 255, 0.2);
+  border-left: 3px solid var(--cc-blockquote-border);
   padding-left: 1em;
   margin: 0.75em 0;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--cc-blockquote-text);
 }
 
 .markdown-body h1,
@@ -92,7 +186,7 @@ body {
 
 .markdown-body hr {
   border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--cc-hr-color);
   margin: 1em 0;
 }
 
@@ -102,6 +196,20 @@ body {
   margin: 0.5em 0;
 }
 
+/* ===== hljs 浅色覆盖 ===== */
+:root.light .hljs {
+  background: var(--cc-bg-code) !important;
+  color: #24292e !important;
+}
+:root.light .hljs-keyword { color: #d73a49 !important; }
+:root.light .hljs-string { color: #032f62 !important; }
+:root.light .hljs-title { color: #6f42c1 !important; }
+:root.light .hljs-comment { color: #6a737d !important; }
+:root.light .hljs-number { color: #005cc5 !important; }
+:root.light .hljs-built_in { color: #e36209 !important; }
+:root.light .hljs-literal { color: #005cc5 !important; }
+:root.light .hljs-attr { color: #005cc5 !important; }
+
 /* ===== 动画 ===== */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
@@ -110,4 +218,10 @@ body {
 
 .animate-fadeIn {
   animation: fadeIn 0.3s ease-out;
+}
+
+/* ===== 主题过渡 ===== */
+.theme-transition,
+.theme-transition * {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease !important;
 }
