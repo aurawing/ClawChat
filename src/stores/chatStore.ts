@@ -1409,8 +1409,31 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     switchSession: (key: string) => {
-      // ——— 切换前：保存正在流式输出的 AI 消息（包括工具调用）到 DB ———
-      _saveStreamingStateToDb(get());
+      const state = get();
+      // ——— 切换前：保存正在流式输出的 AI 消息到 DB + bgStreams ———
+      _saveStreamingStateToDb(state);
+
+      // 关键：如果当前会话正在流式输出，将完整状态移入 bgStreams
+      // 这样后续 SSE 事件能在已有状态基础上继续积累（而不是从零开始）
+      if (state.isStreaming && state.currentSessionKey && state.currentSessionKey !== key) {
+        const sk = state.currentSessionKey;
+        if (!bgStreams.has(sk)) {
+          bgStreams.set(sk, {
+            msgId: state.currentAiMessageId || `ai-${uuid()}`,
+            sessionKey: sk,
+            text: state.currentAiText,
+            thinking: state.currentAiThinking,
+            toolCards: new Map(state.toolCards),
+            blocks: [...state.currentBlocks],
+            thinkingBase: state._blockThinkingBase,
+            textBase: state._blockTextBase,
+            turnBaseText: state._turnBaseText,
+            lastTurnDelta: state._lastTurnDelta,
+            createdAt: Date.now(),
+          });
+          console.debug(`[store] 流式状态转入后台: ${sk} (blocks=${state.currentBlocks.length} tools=${state.toolCards.size})`);
+        }
+      }
 
       set({
         currentSessionKey: key,
@@ -1512,6 +1535,23 @@ export const useChatStore = create<ChatState>((set, get) => {
         const gwToolResults = new Map<string, { output: string; isError?: boolean }>();
         for (const msg of result.messages) {
           const role = msg.role as string;
+
+          // 工具角色消息 — 可能是 string 或 array content
+          if (role === 'tool' || role === 'tool_result' || role === 'toolResult') {
+            const tcId = (msg as Record<string, unknown>).tool_use_id as string
+              || (msg as Record<string, unknown>).tool_call_id as string;
+            if (tcId) {
+              let output = '';
+              if (typeof msg.content === 'string') {
+                output = msg.content;
+              } else if (Array.isArray(msg.content)) {
+                output = extractContentBlockText(msg.content) || '';
+              }
+              if (output) gwToolResults.set(tcId, { output, isError: !!(msg as Record<string, unknown>).is_error });
+            }
+          }
+
+          // 用户消息中可能嵌入 tool_result 块（Anthropic 格式）
           if (Array.isArray(msg.content)) {
             for (const block of msg.content as ContentBlock[]) {
               const b = block as Record<string, unknown>;
@@ -1524,12 +1564,8 @@ export const useChatStore = create<ChatState>((set, get) => {
               }
             }
           }
-          // 简单 content 格式的 tool_result
-          if ((role === 'tool' || role === 'tool_result' || role === 'toolResult') && typeof msg.content === 'string') {
-            const tcId = (msg as Record<string, unknown>).tool_use_id as string;
-            if (tcId) gwToolResults.set(tcId, { output: msg.content as string });
-          }
         }
+        console.debug(`[store] loadHistory: gwToolResults collected ${gwToolResults.size} tool results`);
 
         // ====== 并行加载：本地 DB 消息 + 服务端附件 + 服务端元数据 ======
         const [localMessages, serverAttachments, serverMeta] = await Promise.all([
@@ -1768,6 +1804,15 @@ export const useChatStore = create<ChatState>((set, get) => {
           }
 
           const finalMsgId = (msg.id as string) || uuid();
+
+          if (role === 'assistant' && (toolCalls?.length || blocks?.length)) {
+            console.debug(`[store] loadHistory: msg ${finalMsgId} recovered tc=${toolCalls?.length || 0} blk=${blocks?.length || 0}`);
+            // 回写服务端元数据（确保下次也能恢复）
+            if (finalMsgId && !serverMetaById.has(finalMsgId)) {
+              apiClient.saveMessageMeta(sessionKey, finalMsgId, { toolCalls, thinking, blocks }).catch(() => {});
+            }
+          }
+
           messages.push({
             id: finalMsgId,
             sessionKey,

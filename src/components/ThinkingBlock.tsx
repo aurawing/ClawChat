@@ -8,30 +8,41 @@ interface ThinkingBlockProps {
 
 /**
  * 思维链展示组件
- * - 思考中：默认折叠，显示 "正在思考，已经过 XX 秒"，小字可点击展开/收起
- * - 思考完成：显示 "思考内容"，点击展开/收起，内容默认折叠
+ * - 思考中：自动展开，显示 "正在思考，已经过 XX 秒"
+ * - 思考完成：默认折叠，可点击展开/收起
  */
 export default function ThinkingBlock({ content, isStreaming }: ThinkingBlockProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [userToggled, setUserToggled] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(!!isStreaming);
   const [elapsedSec, setElapsedSec] = useState(0);
   const startTimeRef = useRef<number>(Date.now());
 
+  // 流式结束时自动折叠（除非用户手动操作过）
   useEffect(() => {
-    if (!isStreaming) return;
-    startTimeRef.current = Date.now();
-    const timer = setInterval(() => {
-      setElapsedSec(Math.floor((Date.now() - startTimeRef.current) / 1000));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [isStreaming]);
+    if (isStreaming) {
+      if (!userToggled) setIsExpanded(true);
+      startTimeRef.current = Date.now();
+      const timer = setInterval(() => {
+        setElapsedSec(Math.floor((Date.now() - startTimeRef.current) / 1000));
+      }, 1000);
+      return () => clearInterval(timer);
+    } else {
+      if (!userToggled) setIsExpanded(false);
+    }
+  }, [isStreaming, userToggled]);
 
   if (!content) return null;
+
+  const handleToggle = () => {
+    setUserToggled(true);
+    setIsExpanded(!isExpanded);
+  };
 
   return (
     <div className="mb-2">
       {/* 标题行 — 可点击折叠/展开 */}
       <button
-        onClick={() => setIsExpanded(!isExpanded)}
+        onClick={handleToggle}
         className="flex items-center gap-1.5 text-xs hover:opacity-80 transition-opacity"
       >
         <svg
@@ -61,9 +72,9 @@ export default function ThinkingBlock({ content, isStreaming }: ThinkingBlockPro
         )}
       </button>
 
-      {/* 思维链内容 — 折叠时隐藏 */}
+      {/* 思维链内容 — 使用 Markdown 格式化渲染 */}
       {isExpanded && (
-        <div className="mt-1.5 pl-4 border-l-2 border-purple-500/30 text-th-text-muted text-xs leading-relaxed max-h-64 overflow-y-auto">
+        <div className="mt-1.5 pl-4 border-l-2 border-purple-500/30 text-th-text-muted text-sm leading-relaxed max-h-80 overflow-y-auto">
           <MarkdownRenderer content={content} />
         </div>
       )}

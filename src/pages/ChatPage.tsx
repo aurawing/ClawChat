@@ -509,10 +509,8 @@ function AbortedActions({ onResend, onDelete }: { onResend: () => void; onDelete
 function ThinkingPlaceholder() {
   return (
     <div className="flex justify-start mb-4">
-      <div className="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center mr-2 mt-1 shrink-0">
-        <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-        </svg>
+      <div className="w-7 h-7 rounded-full mr-2 mt-1 shrink-0 overflow-hidden">
+        <img src="/icon-192.png" alt="AI" className="w-full h-full object-cover" />
       </div>
       <div className="bg-th-elevated/60 rounded-2xl rounded-tl-md px-4 py-3">
         <div className="flex items-center gap-1.5">
@@ -529,10 +527,8 @@ function ThinkingPlaceholder() {
 function EmptyState() {
   return (
     <div className="flex flex-col items-center justify-center h-full text-center px-6">
-      <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500/20 to-teal-600/20 flex items-center justify-center mb-4">
-        <svg className="w-8 h-8 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
-        </svg>
+      <div className="w-16 h-16 rounded-2xl overflow-hidden mb-4">
+        <img src="/icon-192.png" alt="ClawChat" className="w-full h-full object-cover" />
       </div>
       <h2 className="text-lg font-semibold text-th-text mb-2">欢迎使用 ClawChat</h2>
       <p className="text-sm text-th-text-muted mb-6 max-w-xs">
