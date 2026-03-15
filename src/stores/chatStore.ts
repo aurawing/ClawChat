@@ -335,9 +335,14 @@ interface ChatState {
   // 工具调用
   toolCards: Map<string, ToolCall>;
 
-  // 内容块顺序追踪（思维链 / 工具调用交错）
+  // 内容块顺序追踪（思维链 / 工具调用 / 文本交错）
   currentBlocks: MessageBlock[];
   _blockThinkingBase: number; // 当前 thinking segment 在 currentAiThinking 中的起始位置
+  _blockTextBase: number;     // 当前 text segment 在 currentAiText 中的起始位置
+
+  // 多轮文本累积追踪（防止工具调用后新 turn 的 delta 重复追加）
+  _turnBaseText: string;     // 上一轮结束时的完整文本（基线）
+  _lastTurnDelta: string;    // 当前轮次 gateway 最后一次发来的 delta 文本
 
   // 中止后的操作状态
   lastAbortedUserMsgId: string | null;
@@ -374,18 +379,27 @@ function extractContentBlockText(content: unknown): string | undefined {
   return undefined;
 }
 
-/** 快照当前 blocks（补全最后一个 thinking 段） */
+/** 快照当前 blocks（补全最后一个 thinking 段 + 剩余文本段） */
 function _snapshotBlocks(state: ChatState): MessageBlock[] {
   const blocks = [...state.currentBlocks];
   const thinkingLen = state.currentAiThinking.length;
-  const base = state._blockThinkingBase;
+  const thinkingBase = state._blockThinkingBase;
   // 如果有未分配到 block 的新 thinking 内容，创建或更新最后一个 thinking block
-  if (thinkingLen > base) {
-    const newContent = state.currentAiThinking.substring(base);
+  if (thinkingLen > thinkingBase) {
+    const newContent = state.currentAiThinking.substring(thinkingBase);
     if (blocks.length > 0 && blocks[blocks.length - 1].type === 'thinking') {
       blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], content: newContent };
     } else {
       blocks.push({ type: 'thinking', content: newContent });
+    }
+  }
+  // 补全剩余文本段（工具调用后的文本）
+  const textLen = state.currentAiText.length;
+  const textBase = state._blockTextBase;
+  if (textLen > textBase) {
+    const textContent = state.currentAiText.substring(textBase).trim();
+    if (textContent) {
+      blocks.push({ type: 'text', content: textContent });
     }
   }
   return blocks;
@@ -416,6 +430,43 @@ function _saveStreamingStateToDb(state: ChatState) {
   );
 }
 
+// ==================== 多轮文本累积辅助 ====================
+// Gateway 在每个 agent turn 开始时会重置 text（从 0 增长），
+// 我们需要正确区分「同 turn 内增长」和「新 turn 开始」，
+// 避免重复追加导致输出内容重复。
+
+/**
+ * 多轮文本累积：根据 base / lastDelta 正确拼接当前 delta
+ * @returns { text: 新 currentAiText, base: 新 turnBase, delta: 新 lastTurnDelta }
+ */
+function accumulateText(
+  cleaned: string,
+  currentText: string,
+  turnBase: string,
+  lastTurnDelta: string,
+): { text: string; base: string; delta: string } {
+  if (!cleaned) return { text: currentText, base: turnBase, delta: lastTurnDelta };
+
+  // Case 1: 文本超过当前总长度 → Gateway 发送完整累积文本（单 turn 模式）
+  if (cleaned.length > currentText.length) {
+    return { text: cleaned, base: turnBase, delta: cleaned };
+  }
+
+  // Case 2: 首个 delta 或同一 turn 内增长
+  // 判断：如果 cleaned 以 lastTurnDelta 开头，说明是同一 turn 的增长
+  const isSameTurn = !lastTurnDelta || cleaned.startsWith(lastTurnDelta);
+
+  if (isSameTurn) {
+    // 同 turn：替换当前 turn 部分
+    const sep = turnBase ? '\n\n' : '';
+    return { text: turnBase + sep + cleaned, base: turnBase, delta: cleaned };
+  }
+
+  // Case 3: 新 turn（cleaned 不以 lastTurnDelta 开头 → 文本被重置了）
+  const newBase = currentText;
+  return { text: currentText + '\n\n' + cleaned, base: newBase, delta: cleaned };
+}
+
 // ==================== 后台会话流式缓冲区 ====================
 // 当用户切换到其他会话时，非当前会话的 SSE 事件仍在到达。
 // 这里维护后台缓冲区，持续处理这些事件，确保切回时数据不丢失。
@@ -427,6 +478,9 @@ interface BgStreamState {
   toolCards: Map<string, ToolCall>;
   blocks: MessageBlock[];
   thinkingBase: number; // thinking 长度基准（用于 blocks 切分）
+  textBase: number;     // text 长度基准（用于 blocks 切分）
+  turnBaseText: string;   // 上一轮的文本基线
+  lastTurnDelta: string;  // 当前轮次最后一次 delta
   createdAt: number;
 }
 const bgStreams = new Map<string, BgStreamState>();
@@ -436,7 +490,7 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
   const sk = payload.sessionKey!;
   const { stream, data } = payload;
 
-  if (stream === 'lifecycle') {
+    if (stream === 'lifecycle') {
     if (data?.phase === 'start') {
       bgStreams.set(sk, {
         msgId: `ai-${uuid()}`,
@@ -446,13 +500,16 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
         toolCards: new Map(),
         blocks: [],
         thinkingBase: 0,
+        textBase: 0,
+        turnBaseText: '',
+        lastTurnDelta: '',
         createdAt: Date.now(),
       });
     }
     if (data?.phase === 'end') {
       const bg = bgStreams.get(sk);
       if (bg && (bg.text || bg.thinking || bg.toolCards.size > 0)) {
-        // 快照最后一个 thinking block
+        // 快照最后一个 thinking block + 剩余 text block
         const blocks = [...bg.blocks];
         if (bg.thinking.length > bg.thinkingBase) {
           const tc = bg.thinking.substring(bg.thinkingBase);
@@ -461,6 +518,10 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
           } else {
             blocks.push({ type: 'thinking', content: tc });
           }
+        }
+        if (bg.text.length > bg.textBase) {
+          const textSeg = bg.text.substring(bg.textBase).trim();
+          if (textSeg) blocks.push({ type: 'text', content: textSeg });
         }
         const msg: Message = {
           id: bg.msgId,
@@ -476,6 +537,14 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
         db.saveMessage(msg).catch((e) =>
           console.warn('[bg] 保存后台消息失败:', e)
         );
+        // 持久化元数据到服务端
+        if (msg.toolCalls?.length || msg.thinking || msg.blocks?.length) {
+          apiClient.saveMessageMeta(sk, msg.id, {
+            toolCalls: msg.toolCalls,
+            thinking: msg.thinking,
+            blocks: msg.blocks,
+          }).catch(() => {});
+        }
       }
       bgStreams.delete(sk);
     }
@@ -492,6 +561,9 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
       toolCards: new Map(),
       blocks: [],
       thinkingBase: 0,
+      textBase: 0,
+      turnBaseText: '',
+      lastTurnDelta: '',
       createdAt: Date.now(),
     });
   }
@@ -503,11 +575,10 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
       const thinking = extractThinkingContent(text);
       const cleaned = stripThinkingTags(text);
       if (cleaned) {
-        if (cleaned.length > bg.text.length) {
-          bg.text = cleaned;
-        } else if (cleaned.length > 0 && !bg.text.endsWith(cleaned)) {
-          bg.text = bg.text + '\n\n' + cleaned;
-        }
+        const acc = accumulateText(cleaned, bg.text, bg.turnBaseText, bg.lastTurnDelta);
+        bg.text = acc.text;
+        bg.turnBaseText = acc.base;
+        bg.lastTurnDelta = acc.delta;
       }
       if (thinking) {
         if (thinking.length > bg.thinking.length) {
@@ -533,7 +604,7 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
 
     const isNew = !bg.toolCards.has(toolCallId as string);
     if (isNew) {
-      // 新工具：先快照当前 thinking 段，再添加 tool block
+      // 新工具：先快照当前 thinking 段和 text 段，再添加 tool block
       if (bg.thinking.length > bg.thinkingBase) {
         const tc = bg.thinking.substring(bg.thinkingBase);
         if (bg.blocks.length > 0 && bg.blocks[bg.blocks.length - 1].type === 'thinking') {
@@ -542,6 +613,11 @@ function _bgHandleAgentEvent(payload: AgentEventPayload) {
           bg.blocks.push({ type: 'thinking', content: tc });
         }
         bg.thinkingBase = bg.thinking.length;
+      }
+      if (bg.text.length > bg.textBase) {
+        const textSeg = bg.text.substring(bg.textBase).trim();
+        if (textSeg) bg.blocks.push({ type: 'text', content: textSeg });
+        bg.textBase = bg.text.length;
       }
       bg.blocks.push({ type: 'tool', toolCallId: toolCallId as string });
 
@@ -584,7 +660,7 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
       : undefined;
     const finalThinking = thinking || bg?.thinking || undefined;
 
-    // 快照 blocks
+    // 快照 blocks（补全 thinking + text 段）
     let blocks: MessageBlock[] | undefined;
     if (bg && bg.blocks.length > 0) {
       blocks = [...bg.blocks];
@@ -595,6 +671,10 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
         } else {
           blocks.push({ type: 'thinking', content: tc });
         }
+      }
+      if (bg.text.length > bg.textBase) {
+        const textSeg = bg.text.substring(bg.textBase).trim();
+        if (textSeg) blocks.push({ type: 'text', content: textSeg });
       }
     }
 
@@ -613,6 +693,14 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
       db.saveMessage(msg).catch((e) =>
         console.warn('[bg] 保存后台 final 消息失败:', e)
       );
+      // 持久化元数据到服务端
+      if (msg.toolCalls?.length || msg.thinking || msg.blocks?.length) {
+        apiClient.saveMessageMeta(sk, msg.id, {
+          toolCalls: msg.toolCalls,
+          thinking: msg.thinking,
+          blocks: msg.blocks,
+        }).catch(() => {});
+      }
     }
     bgStreams.delete(sk);
   }
@@ -660,14 +748,12 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentRunId: payload.runId || state.currentRunId,
         lastAbortedUserMsgId: null,
       };
-      // 文本累积（兼容 agent 多 turn 重置）
+      // 文本累积（使用多轮累积辅助函数，防止重复追加）
       if (text) {
-        if (text.length > state.currentAiText.length) {
-          updates.currentAiText = text;
-        } else if (text.length > 0 && text.length < state.currentAiText.length
-          && !state.currentAiText.endsWith(text)) {
-          updates.currentAiText = state.currentAiText + '\n\n' + text;
-        }
+        const acc = accumulateText(text, state.currentAiText, state._turnBaseText, state._lastTurnDelta);
+        updates.currentAiText = acc.text;
+        updates._turnBaseText = acc.base;
+        updates._lastTurnDelta = acc.delta;
       }
       // 思维链累积
       if (thinking) {
@@ -694,10 +780,8 @@ export const useChatStore = create<ChatState>((set, get) => {
               : undefined;
             set((s) => {
               const toolCards = new Map(s.toolCards);
-              if (toolCards.has(tcId)) {
-                const existing = toolCards.get(tcId)!;
-                toolCards.set(tcId, { ...existing, input: inputStr || existing.input });
-              } else {
+              const isNewTc = !toolCards.has(tcId);
+              if (isNewTc) {
                 toolCards.set(tcId, {
                   id: tcId,
                   name: tcName,
@@ -705,8 +789,33 @@ export const useChatStore = create<ChatState>((set, get) => {
                   input: inputStr,
                   startedAt: Date.now(),
                 });
+              } else {
+                const existing = toolCards.get(tcId)!;
+                toolCards.set(tcId, { ...existing, input: inputStr || existing.input });
               }
-              return { toolCards };
+              // 追踪 blocks 顺序
+              let currentBlocks = s.currentBlocks;
+              let _blockThinkingBase = s._blockThinkingBase;
+              let _blockTextBase = s._blockTextBase;
+              if (isNewTc) {
+                currentBlocks = [...currentBlocks];
+                if (s.currentAiThinking.length > _blockThinkingBase) {
+                  const seg = s.currentAiThinking.substring(_blockThinkingBase);
+                  if (currentBlocks.length > 0 && currentBlocks[currentBlocks.length - 1].type === 'thinking') {
+                    currentBlocks[currentBlocks.length - 1] = { type: 'thinking', content: seg };
+                  } else {
+                    currentBlocks.push({ type: 'thinking', content: seg });
+                  }
+                  _blockThinkingBase = s.currentAiThinking.length;
+                }
+                if (s.currentAiText.length > _blockTextBase) {
+                  const textSeg = s.currentAiText.substring(_blockTextBase).trim();
+                  if (textSeg) currentBlocks.push({ type: 'text', content: textSeg });
+                  _blockTextBase = s.currentAiText.length;
+                }
+                currentBlocks.push({ type: 'tool', toolCallId: tcId });
+              }
+              return { toolCards, currentBlocks, _blockThinkingBase, _blockTextBase };
             });
           }
           // 也提取 tool_result 块（工具调用输出）
@@ -779,11 +888,27 @@ export const useChatStore = create<ChatState>((set, get) => {
           toolCards: new Map(),
           currentBlocks: [],
           _blockThinkingBase: 0,
+          _blockTextBase: 0,
+          _turnBaseText: '',
+          _lastTurnDelta: '',
           lastAbortedUserMsgId: null,
         }));
 
-        // 持久化
+        // 持久化到本地 DB
         db.saveMessage(aiMsg);
+
+        // 持久化元数据到服务端（跨安装恢复）
+        if (aiMsg.toolCalls?.length || aiMsg.thinking || aiMsg.blocks?.length) {
+          apiClient.saveMessageMeta(
+            aiMsg.sessionKey,
+            aiMsg.id,
+            {
+              toolCalls: aiMsg.toolCalls,
+              thinking: aiMsg.thinking,
+              blocks: aiMsg.blocks,
+            }
+          ).catch(() => {});
+        }
 
         // 如果是第一条 AI 回复, 用 AI 生成会话标题
         if (state.messages.filter(m => m.role === 'assistant').length === 0) {
@@ -823,6 +948,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           toolCards: new Map(),
           currentBlocks: [],
           _blockThinkingBase: 0,
+          _blockTextBase: 0,
+          _turnBaseText: '',
+          _lastTurnDelta: '',
         });
       }
       return;
@@ -852,6 +980,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           toolCards: new Map(),
           currentBlocks: [],
           _blockThinkingBase: 0,
+          _blockTextBase: 0,
+          _turnBaseText: '',
+          _lastTurnDelta: '',
           lastAbortedUserMsgId: lastUserMsg?.id || null,
         }));
       } else {
@@ -864,6 +995,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           toolCards: new Map(),
           currentBlocks: [],
           _blockThinkingBase: 0,
+          _blockTextBase: 0,
+          _turnBaseText: '',
+          _lastTurnDelta: '',
           lastAbortedUserMsgId: lastUserMsg?.id || null,
         });
       }
@@ -889,6 +1023,9 @@ export const useChatStore = create<ChatState>((set, get) => {
         toolCards: new Map(),
           currentBlocks: [],
           _blockThinkingBase: 0,
+          _blockTextBase: 0,
+          _turnBaseText: '',
+          _lastTurnDelta: '',
       }));
       return;
     }
@@ -934,29 +1071,23 @@ export const useChatStore = create<ChatState>((set, get) => {
         };
 
         if (cleaned) {
-          if (cleaned.length > state.currentAiText.length) {
-            // 同 turn 内文本持续增长
-            updates.currentAiText = cleaned;
-          } else if (cleaned.length > 0 && cleaned.length < state.currentAiText.length
-            && !state.currentAiText.endsWith(cleaned)) {
-            // 新 turn：text 变短了（从头开始） → 拼接到已有文本后面
-            updates.currentAiText = state.currentAiText + '\n\n' + cleaned;
-          }
+          const acc = accumulateText(cleaned, state.currentAiText, state._turnBaseText, state._lastTurnDelta);
+          updates.currentAiText = acc.text;
+          updates._turnBaseText = acc.base;
+          updates._lastTurnDelta = acc.delta;
         }
 
         if (thinking) {
           if (thinking.length > state.currentAiThinking.length) {
-            // 同 turn 思维链增长
             updates.currentAiThinking = thinking;
           } else if (!state.currentAiThinking.endsWith(thinking)) {
-            // 新 turn 出现新的思维链 → 追加（用分隔符区分不同轮次）
             updates.currentAiThinking = state.currentAiThinking
               ? state.currentAiThinking + '\n\n---\n\n' + thinking
               : thinking;
           }
         }
 
-        if (updates.currentAiText || updates.currentAiThinking) {
+        if (updates.currentAiText !== undefined || updates.currentAiThinking) {
           set(updates as ChatState);
         }
       }
@@ -1025,6 +1156,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         // ====== 追踪 blocks 顺序 ======
         let currentBlocks = s.currentBlocks;
         let _blockThinkingBase = s._blockThinkingBase;
+        let _blockTextBase = s._blockTextBase;
         if (isNew) {
           currentBlocks = [...currentBlocks];
           // 快照当前 thinking 段到 block 中
@@ -1037,11 +1169,19 @@ export const useChatStore = create<ChatState>((set, get) => {
             }
             _blockThinkingBase = s.currentAiThinking.length;
           }
+          // 快照当前 text 段到 block 中
+          if (s.currentAiText.length > _blockTextBase) {
+            const textSeg = s.currentAiText.substring(_blockTextBase).trim();
+            if (textSeg) {
+              currentBlocks.push({ type: 'text', content: textSeg });
+            }
+            _blockTextBase = s.currentAiText.length;
+          }
           // 添加 tool block
           currentBlocks.push({ type: 'tool', toolCallId: toolCallId as string });
         }
 
-        return { toolCards, currentBlocks, _blockThinkingBase };
+        return { toolCards, currentBlocks, _blockThinkingBase, _blockTextBase };
       });
       return;
     }
@@ -1095,8 +1235,11 @@ export const useChatStore = create<ChatState>((set, get) => {
     currentAiThinking: '',
     currentAiMessageId: null,
     toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
+    currentBlocks: [],
+    _blockThinkingBase: 0,
+    _blockTextBase: 0,
+    _turnBaseText: '',
+    _lastTurnDelta: '',
     lastAbortedUserMsgId: null,
 
     connect: (config: ServerConfig) => {
@@ -1164,8 +1307,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
+        currentBlocks: [],
+        _blockThinkingBase: 0,
+        _blockTextBase: 0,
+        _turnBaseText: '',
+        _lastTurnDelta: '',
         lastAbortedUserMsgId: null,
       });
     },
@@ -1253,8 +1399,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
+        currentBlocks: [],
+        _blockThinkingBase: 0,
+        _blockTextBase: 0,
+        _turnBaseText: '',
+        _lastTurnDelta: '',
         lastAbortedUserMsgId: lastUserMsg?.id || null,
       });
     },
@@ -1272,8 +1421,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
+        currentBlocks: [],
+        _blockThinkingBase: 0,
+        _blockTextBase: 0,
+        _turnBaseText: '',
+        _lastTurnDelta: '',
         lastAbortedUserMsgId: null,
       });
       localStorage.setItem('clawchat-session-key', key);
@@ -1281,7 +1433,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       // 检查目标会话是否有后台流式缓冲区（切走时还在输出的那段）
       const bg = bgStreams.get(key);
       if (bg) {
-        // 将后台缓冲区的状态"提升"到前台（包括 blocks）
+        // 将后台缓冲区的状态"提升"到前台（包括 blocks 和 turn 追踪）
         set({
           currentAiMessageId: bg.msgId,
           currentAiText: bg.text,
@@ -1289,6 +1441,9 @@ export const useChatStore = create<ChatState>((set, get) => {
           toolCards: new Map(bg.toolCards),
           currentBlocks: bg.blocks,
           _blockThinkingBase: bg.thinkingBase,
+          _blockTextBase: bg.textBase,
+          _turnBaseText: bg.turnBaseText,
+          _lastTurnDelta: bg.lastTurnDelta,
           isStreaming: true,
         });
         bgStreams.delete(key);
@@ -1325,8 +1480,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
+        currentBlocks: [],
+        _blockThinkingBase: 0,
+        _blockTextBase: 0,
+        _turnBaseText: '',
+        _lastTurnDelta: '',
         lastAbortedUserMsgId: null,
       });
       localStorage.setItem('clawchat-session-key', newKey);
@@ -1350,11 +1508,41 @@ export const useChatStore = create<ChatState>((set, get) => {
           return;
         }
 
-        // ====== 并行加载：本地 DB 消息 + 服务端附件 ======
-        const [localMessages, serverAttachments] = await Promise.all([
+        // ====== 预处理：收集 Gateway 中的 tool_result（用于恢复工具调用输出）======
+        const gwToolResults = new Map<string, { output: string; isError?: boolean }>();
+        for (const msg of result.messages) {
+          const role = msg.role as string;
+          if (Array.isArray(msg.content)) {
+            for (const block of msg.content as ContentBlock[]) {
+              const b = block as Record<string, unknown>;
+              if (b.type === 'tool_result' && (b.tool_use_id || b.id)) {
+                const tcId = (b.tool_use_id || b.id) as string;
+                const output = extractContentBlockText(b.content) || (b.output as string) || (b.text as string) || '';
+                if (output) {
+                  gwToolResults.set(tcId, { output, isError: !!(b.is_error) });
+                }
+              }
+            }
+          }
+          // 简单 content 格式的 tool_result
+          if ((role === 'tool' || role === 'tool_result' || role === 'toolResult') && typeof msg.content === 'string') {
+            const tcId = (msg as Record<string, unknown>).tool_use_id as string;
+            if (tcId) gwToolResults.set(tcId, { output: msg.content as string });
+          }
+        }
+
+        // ====== 并行加载：本地 DB 消息 + 服务端附件 + 服务端元数据 ======
+        const [localMessages, serverAttachments, serverMeta] = await Promise.all([
           db.getMessages(sessionKey),
           apiClient.getSessionAttachments(sessionKey).catch(() => []),
+          apiClient.getSessionMeta(sessionKey).catch(() => [] as Array<{messageId: string; toolCalls?: ToolCall[]; thinking?: string; blocks?: MessageBlock[]}>),
         ]);
+
+        // 构建服务端元数据索引（messageId → meta）
+        const serverMetaById = new Map<string, { toolCalls?: ToolCall[]; thinking?: string; blocks?: MessageBlock[] }>();
+        for (const m of serverMeta) {
+          if (m.messageId) serverMetaById.set(m.messageId, m);
+        }
 
         // 构建本地 DB 附件匹配索引 + 工具调用索引
         const localAttById = new Map<string, FileAttachment[]>();
@@ -1499,26 +1687,89 @@ export const useChatStore = create<ChatState>((set, get) => {
 
           if (!text && attachments.length === 0) continue;
 
-          // ====== 恢复工具调用 + 思维链 + blocks 数据（从本地 DB）======
+          // ====== 恢复工具调用 + 思维链 + blocks 数据 ======
+          // 优先级：Gateway 消息内容解析 → 服务端元数据 → 本地 IndexedDB
           let toolCalls: ToolCall[] | undefined;
           let thinking: string | undefined;
           let blocks: MessageBlock[] | undefined;
           if (role === 'assistant') {
             const msgId = msg.id as string;
             const tcKey = text.substring(0, 50).trim();
-            toolCalls = (msgId ? localToolCallsById.get(msgId) : undefined)
-              || (tcKey ? localToolCallsByText.get(tcKey) : undefined)
-              || undefined;
-            thinking = (msgId ? localThinkingById.get(msgId) : undefined)
-              || (tcKey ? localThinkingByText.get(tcKey) : undefined)
-              || undefined;
-            blocks = (msgId ? localBlocksById.get(msgId) : undefined)
-              || (tcKey ? localBlocksByText.get(tcKey) : undefined)
-              || undefined;
+
+            // ① 从 Gateway 消息 content 数组解析 tool_use 块（即使重装也可恢复）
+            let gwToolCalls: ToolCall[] | undefined;
+            let gwBlocks: MessageBlock[] | undefined;
+            let gwThinking: string | undefined;
+            if (Array.isArray(msg.content)) {
+              const parsedTc: ToolCall[] = [];
+              const parsedBlocks: MessageBlock[] = [];
+              let hasThinkingBlock = false;
+              for (const block of msg.content as ContentBlock[]) {
+                const b = block as Record<string, unknown>;
+                if (b.type === 'thinking' && typeof b.thinking === 'string') {
+                  // Anthropic 格式 thinking block
+                  parsedBlocks.push({ type: 'thinking', content: b.thinking as string });
+                  hasThinkingBlock = true;
+                } else if (b.type === 'text' && typeof b.text === 'string') {
+                  const thk = extractThinkingContent(b.text as string);
+                  const clean = stripThinkingTags(b.text as string);
+                  if (thk) parsedBlocks.push({ type: 'thinking', content: thk });
+                  if (clean.trim()) parsedBlocks.push({ type: 'text', content: clean.trim() });
+                } else if (b.type === 'tool_use' && (b.id || b.tool_use_id)) {
+                  const tcId = (b.id || b.tool_use_id) as string;
+                  const tcName = (b.name as string) || 'tool';
+                  const inputRaw = b.input;
+                  const inputStr = inputRaw
+                    ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2))
+                    : undefined;
+                  // 查找对应的 tool_result
+                  const resultInfo = gwToolResults.get(tcId);
+                  parsedTc.push({
+                    id: tcId,
+                    name: tcName,
+                    status: resultInfo ? (resultInfo.isError ? 'error' : 'done') : 'done',
+                    input: inputStr,
+                    output: resultInfo?.output,
+                    startedAt: msg.timestamp || Date.now(),
+                    finishedAt: resultInfo ? (msg.timestamp || Date.now()) : undefined,
+                  });
+                  parsedBlocks.push({ type: 'tool', toolCallId: tcId });
+                }
+              }
+              if (parsedTc.length > 0) gwToolCalls = parsedTc;
+              if (parsedBlocks.length > 0) gwBlocks = parsedBlocks;
+              if (hasThinkingBlock) {
+                gwThinking = parsedBlocks
+                  .filter(b => b.type === 'thinking' && b.content)
+                  .map(b => b.content!)
+                  .join('\n\n---\n\n');
+              }
+            }
+
+            // ② 提取 <thinking> 标签中的思维链（通用兼容）
+            const rawTextContent = typeof msg.content === 'string' ? msg.content : '';
+            const tagThinking = rawTextContent ? extractThinkingContent(rawTextContent) : '';
+
+            // ③ 从服务端元数据恢复
+            const sMeta = msgId ? serverMetaById.get(msgId) : undefined;
+
+            // ④ 从本地 IndexedDB 恢复
+            const localTc = (msgId ? localToolCallsById.get(msgId) : undefined)
+              || (tcKey ? localToolCallsByText.get(tcKey) : undefined);
+            const localThk = (msgId ? localThinkingById.get(msgId) : undefined)
+              || (tcKey ? localThinkingByText.get(tcKey) : undefined);
+            const localBlk = (msgId ? localBlocksById.get(msgId) : undefined)
+              || (tcKey ? localBlocksByText.get(tcKey) : undefined);
+
+            // 合并结果（优先级：Gateway 解析 > 服务端元数据 > 本地 DB）
+            toolCalls = gwToolCalls || sMeta?.toolCalls || localTc || undefined;
+            thinking = gwThinking || tagThinking || sMeta?.thinking || localThk || undefined;
+            blocks = gwBlocks || sMeta?.blocks || localBlk || undefined;
           }
 
+          const finalMsgId = (msg.id as string) || uuid();
           messages.push({
-            id: (msg.id as string) || uuid(),
+            id: finalMsgId,
             sessionKey,
             role: role === 'assistant' ? 'assistant' : 'user',
             content: text,
@@ -1715,8 +1966,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
+        currentBlocks: [],
+        _blockThinkingBase: 0,
+        _blockTextBase: 0,
+        _turnBaseText: '',
+        _lastTurnDelta: '',
         lastAbortedUserMsgId: null,
       });
 
@@ -1739,8 +1993,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentAiMessageId: null,
         currentRunId: null,
         toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
+        currentBlocks: [],
+        _blockThinkingBase: 0,
+        _blockTextBase: 0,
+        _turnBaseText: '',
+        _lastTurnDelta: '',
         lastAbortedUserMsgId: null,
       });
 

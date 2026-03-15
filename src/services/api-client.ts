@@ -537,6 +537,51 @@ export class ApiClient {
     }
   }
 
+  /** 保存助手消息元数据到服务端（工具调用、思维链、blocks） */
+  async saveMessageMeta(
+    sessionKey: string,
+    messageId: string,
+    meta: { toolCalls?: unknown[]; thinking?: string; blocks?: unknown[] }
+  ): Promise<void> {
+    if (!this._sid || !this._baseUrl) return;
+    try {
+      await fetch(`${this._baseUrl}/api/message-meta`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sid: this._sid,
+          sessionKey,
+          messageId,
+          toolCalls: meta.toolCalls,
+          thinking: meta.thinking,
+          blocks: meta.blocks,
+        }),
+      });
+    } catch (e) {
+      console.warn('[api] saveMessageMeta error:', e);
+    }
+  }
+
+  /** 从服务端获取会话的所有助手元数据 */
+  async getSessionMeta(sessionKey: string): Promise<Array<{
+    messageId: string;
+    toolCalls?: unknown[];
+    thinking?: string;
+    blocks?: unknown[];
+  }>> {
+    if (!this._sid || !this._baseUrl) return [];
+    try {
+      const res = await fetch(
+        `${this._baseUrl}/api/message-meta?sid=${this._sid}&sessionKey=${encodeURIComponent(sessionKey)}`
+      );
+      const data = await res.json();
+      return data?.meta || [];
+    } catch (e) {
+      console.warn('[api] getSessionMeta error:', e);
+      return [];
+    }
+  }
+
   // ==================== 内部辅助 ====================
 
   private _notifyReadyError(msg: string): void {

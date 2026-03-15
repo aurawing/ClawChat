@@ -197,7 +197,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     return map;
   }, [message.toolCalls]);
 
-  const useBlocks = message.blocks && message.blocks.length > 0 && hasToolCalls;
+  const useBlocks = message.blocks && message.blocks.length > 0;
 
   const blocksToolIds = useMemo(() => {
     if (!useBlocks) return new Set<string>();
@@ -208,11 +208,25 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
     );
   }, [useBlocks, message.blocks]);
 
+  // blocks 中已包含的 text 内容（用于判断是否需要额外渲染 message.content）
+  const blocksHasText = useMemo(() => {
+    if (!useBlocks) return false;
+    return message.blocks!.some((b: MessageBlock) => b.type === 'text' && b.content);
+  }, [useBlocks, message.blocks]);
+
   const remainingTools = useMemo(() => {
     if (!hasToolCalls) return [];
     if (!useBlocks) return message.toolCalls!;
     return message.toolCalls!.filter((tc) => !blocksToolIds.has(tc.id));
   }, [hasToolCalls, useBlocks, message.toolCalls, blocksToolIds]);
+
+  // 计算 blocks 中未涵盖的剩余文本（blocks 中文本段的总长度 vs message.content）
+  const remainingText = useMemo(() => {
+    if (!useBlocks || !blocksHasText || !message.content) return message.content || '';
+    // 如果 blocks 中有 text 类型，说明文本已被分段到 blocks 中
+    // 只在 blocks 不含 text 时使用 message.content 整体渲染
+    return '';
+  }, [useBlocks, blocksHasText, message.content]);
 
   return (
     <>
@@ -249,7 +263,7 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                         isStreaming={
                           message.isStreaming &&
                           i === message.blocks!.length - 1 &&
-                          !message.content
+                          block.type === 'thinking'
                         }
                       />
                     );
@@ -260,11 +274,43 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                       return <ToolCallBlock key={`blk-tc-${block.toolCallId}`} toolCall={tc} />;
                     }
                   }
+                  if (block.type === 'text' && block.content) {
+                    return (
+                      <div
+                        key={`blk-txt-${i}`}
+                        className="text-th-text"
+                        onClick={(e) => {
+                          const target = e.target as HTMLElement;
+                          if (target.tagName === 'IMG') {
+                            const imgSrc = (target as HTMLImageElement).src;
+                            if (imgSrc) { e.preventDefault(); setViewerSrc(imgSrc); }
+                          }
+                        }}
+                      >
+                        <MarkdownRenderer content={block.content} />
+                      </div>
+                    );
+                  }
                   return null;
                 })}
                 {remainingTools.map((tc) => (
                   <ToolCallBlock key={`tc-rem-${tc.id}`} toolCall={tc} />
                 ))}
+                {/* blocks 中没有 text 类型时，渲染完整 content */}
+                {remainingText && (
+                  <div
+                    className="text-th-text"
+                    onClick={(e) => {
+                      const target = e.target as HTMLElement;
+                      if (target.tagName === 'IMG') {
+                        const imgSrc = (target as HTMLImageElement).src;
+                        if (imgSrc) { e.preventDefault(); setViewerSrc(imgSrc); }
+                      }
+                    }}
+                  >
+                    <MarkdownRenderer content={remainingText} />
+                  </div>
+                )}
               </>
             ) : (
               /* ====== 传统渲染模式 ====== */
@@ -280,26 +326,22 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
                     <ToolCallBlock key={`tc-${tc.id}`} toolCall={tc} />
                   ))
                 }
+                {/* 主要内容 */}
+                {message.content && (
+                  <div
+                    className="text-th-text"
+                    onClick={(e) => {
+                      const target = e.target as HTMLElement;
+                      if (target.tagName === 'IMG') {
+                        const imgSrc = (target as HTMLImageElement).src;
+                        if (imgSrc) { e.preventDefault(); setViewerSrc(imgSrc); }
+                      }
+                    }}
+                  >
+                    <MarkdownRenderer content={message.content} />
+                  </div>
+                )}
               </>
-            )}
-
-            {/* 主要内容 */}
-            {message.content && (
-              <div
-                className="text-th-text"
-                onClick={(e) => {
-                  const target = e.target as HTMLElement;
-                  if (target.tagName === 'IMG') {
-                    const imgSrc = (target as HTMLImageElement).src;
-                    if (imgSrc) {
-                      e.preventDefault();
-                      setViewerSrc(imgSrc);
-                    }
-                  }
-                }}
-              >
-                <MarkdownRenderer content={message.content} />
-              </div>
             )}
 
             {/* 流式光标 */}

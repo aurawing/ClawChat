@@ -21,6 +21,7 @@ export default function ChatPage() {
     toolCards,
     currentBlocks,
     _blockThinkingBase,
+    _blockTextBase,
     connectionStatus,
     serverConfig,
     username,
@@ -99,14 +100,22 @@ export default function ChatPage() {
   const hasToolCards = toolCards.size > 0;
 
   const liveBlocks = (() => {
-    if (!currentBlocks.length && !currentAiThinking) return undefined;
+    if (!currentBlocks.length && !currentAiThinking && !currentAiText) return undefined;
     const blocks = [...currentBlocks];
+    // 补全当前 thinking 段
     if (currentAiThinking.length > _blockThinkingBase) {
       const seg = currentAiThinking.substring(_blockThinkingBase);
       if (blocks.length > 0 && blocks[blocks.length - 1].type === 'thinking') {
         blocks[blocks.length - 1] = { ...blocks[blocks.length - 1], content: seg };
       } else {
         blocks.push({ type: 'thinking', content: seg });
+      }
+    }
+    // 补全当前 text 段（工具调用后的文本或流式增长文本）
+    if (currentAiText.length > _blockTextBase) {
+      const textSeg = currentAiText.substring(_blockTextBase).trim();
+      if (textSeg) {
+        blocks.push({ type: 'text', content: textSeg });
       }
     }
     return blocks.length > 0 ? blocks : undefined;

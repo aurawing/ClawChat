@@ -158,6 +158,20 @@ sqlite.exec(`
 `);
 sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_att_session ON attachments(session_key)`);
 
+// ====== 助手消息元数据（工具调用、思维链、blocks 交错顺序）======
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS assistant_meta (
+    session_key TEXT NOT NULL,
+    message_id  TEXT NOT NULL,
+    tool_calls  TEXT,
+    thinking    TEXT,
+    blocks      TEXT,
+    created_at  INTEGER DEFAULT (strftime('%s','now') * 1000),
+    PRIMARY KEY (session_key, message_id)
+  )
+`);
+sqlite.exec(`CREATE INDEX IF NOT EXISTS idx_meta_session ON assistant_meta(session_key)`);
+
 /** MIME → 文件扩展名 */
 function mimeToExt(mime) {
   const map = {
@@ -185,6 +199,17 @@ const stmts = {
   getAttById: sqlite.prepare(`SELECT file_name, mime_type, file_path FROM attachments WHERE id = ?`),
   getAttPathsBySession: sqlite.prepare(`SELECT file_path FROM attachments WHERE session_key = ?`),
   deleteAttBySession: sqlite.prepare(`DELETE FROM attachments WHERE session_key = ?`),
+  // 助手元数据
+  upsertMeta: sqlite.prepare(`
+    INSERT INTO assistant_meta (session_key, message_id, tool_calls, thinking, blocks, created_at) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_key, message_id) DO UPDATE SET
+      tool_calls = COALESCE(excluded.tool_calls, assistant_meta.tool_calls),
+      thinking = COALESCE(excluded.thinking, assistant_meta.thinking),
+      blocks = COALESCE(excluded.blocks, assistant_meta.blocks),
+      created_at = excluded.created_at
+  `),
+  getMetaBySession: sqlite.prepare(`SELECT message_id, tool_calls, thinking, blocks FROM assistant_meta WHERE session_key = ? ORDER BY created_at`),
+  deleteMetaBySession: sqlite.prepare(`DELETE FROM assistant_meta WHERE session_key = ?`),
 };
 
 /** 持久化 deviceToken */
@@ -982,7 +1007,8 @@ app.post('/api/send', async (req, res) => {
         try { unlinkSync(join(UPLOADS_DIR, file_path)); } catch { /* 文件可能已不在 */ }
       }
       stmts.deleteAttBySession.run(params.key);
-      log.debug(`清理已删除会话: ${params.key} (标题 + ${attPaths.length} 个附件)`);
+      stmts.deleteMetaBySession.run(params.key);
+      log.debug(`清理已删除会话: ${params.key} (标题 + ${attPaths.length} 个附件 + 元数据)`);
     }
 
     // ====== 过滤 sessions.list，只返回 ClawChat 创建的会话（带 clawchat- 前缀） ======
@@ -1105,6 +1131,39 @@ app.get('/api/attachment/:id', (req, res) => {
   res.setHeader('Content-Type', row.mime_type);
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); // 附件不变，长缓存
   res.sendFile(filePath);
+});
+
+/** POST /api/message-meta — 保存助手消息元数据（工具调用、思维链、blocks） */
+app.post('/api/message-meta', (req, res) => {
+  const { sid, sessionKey, messageId, toolCalls, thinking, blocks } = req.body || {};
+  const session = sessions.get(sid);
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+  if (!sessionKey || !messageId) return res.status(400).json({ ok: false, error: '缺少参数' });
+
+  const tcJson = toolCalls ? JSON.stringify(toolCalls) : null;
+  const thkStr = thinking || null;
+  const blkJson = blocks ? JSON.stringify(blocks) : null;
+  stmts.upsertMeta.run(sessionKey, messageId, tcJson, thkStr, blkJson, Date.now());
+  log.debug(`保存助手元数据: ${sessionKey} / ${messageId} (tc=${!!tcJson} thk=${!!thkStr} blk=${!!blkJson})`);
+  res.json({ ok: true });
+});
+
+/** GET /api/message-meta — 获取会话的所有助手元数据 */
+app.get('/api/message-meta', (req, res) => {
+  const sid = String(req.query.sid || '');
+  const sessionKey = String(req.query.sessionKey || '');
+  const session = sessions.get(sid);
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+  if (!sessionKey) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
+
+  const rows = stmts.getMetaBySession.all(sessionKey);
+  const meta = rows.map(r => ({
+    messageId: r.message_id,
+    toolCalls: r.tool_calls ? JSON.parse(r.tool_calls) : undefined,
+    thinking: r.thinking || undefined,
+    blocks: r.blocks ? JSON.parse(r.blocks) : undefined,
+  }));
+  res.json({ ok: true, meta });
 });
 
 // ==================== 定期清理 ====================
