@@ -104,6 +104,14 @@ export interface FileAttachment {
   category?: string;
 }
 
+export interface FileBrowserEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  size: number;
+  modifiedAt: number;
+}
+
 // ===== 本地消息模型 =====
 
 export type MessageRole = 'user' | 'assistant' | 'system';

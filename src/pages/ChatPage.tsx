@@ -5,7 +5,7 @@ import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import SessionList from '../components/SessionList';
 import { useTheme } from '../hooks/useTheme';
-import type { ChatMessage, ContentBlock, FileAttachment, Message, MessageBlock, ServerConfig, ToolCall } from '../types';
+import type { ChatMessage, ContentBlock, FileAttachment, FileBrowserEntry, Message, MessageBlock, ServerConfig, ToolCall } from '../types';
 
 function normalizeAssistantBlocks(message: Message): MessageBlock[] {
   if (message.blocks?.length) {
@@ -133,6 +133,32 @@ function stripThinkingTags(text: string): string {
   return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '').trim();
 }
 
+function stripOperatorInjectedContent(text: string): string {
+  return text
+    .replace(
+      /Skills\s+store\s+policy\s*\(operator\s+configured\)\s*:[\s\S]*?(?=\n{2,}|\n(?=[A-Z])|$)/gi,
+      ''
+    )
+    .replace(/^\[system\][\s\S]*?(?=\n{2,}|$)/gim, '')
+    .replace(
+      /Conversation info\s*\(untrusted metadata\)\s*:?\s*```json[\s\S]*?```\s*/gi,
+      ''
+    )
+    .replace(/^##\s*(?:System|Operator)\s+(?:Message|Instructions?)[\s\S]*?(?=\n{2,}|$)/gim, '')
+    .trim();
+}
+
+function stripTimestampPrefix(text: string): string {
+  return text
+    .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|[A-Z]{2,5})?\]\s*/gi, '')
+    .replace(/^\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\]\s*/g, '')
+    .replace(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\s*\n/g, '')
+    .replace(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|[A-Z]{2,5})?\s*\n/gi, '')
+    .replace(/^\[\d{2}:\d{2}(?::\d{2})?\]\s*/g, '')
+    .replace(/^\d{13,}\s*\n/g, '')
+    .trim();
+}
+
 function extractContentBlockText(content: unknown): string {
   if (typeof content === 'string') return stripThinkingTags(content);
   if (!Array.isArray(content)) return '';
@@ -165,16 +191,16 @@ function stringifyToolPayload(payload: unknown): string | undefined {
 }
 
 function parseHistoryDetailMessages(history: ChatMessage[]): Message[] {
-  const toolResults = new Map<string, { output: string; isError?: boolean }>();
+  const toolResults = new Map<string, { output: string; isError?: boolean; timestamp?: number }>();
 
   for (const msg of history) {
     const role = String(msg.role || '');
     if (role === 'tool' || role === 'tool_result' || role === 'toolResult') {
       const tcId = extractToolCallId(msg as unknown as Record<string, unknown>);
-      const output = typeof msg.content === 'string' ? msg.content : extractContentBlockText(msg.content);
+        const output = typeof msg.content === 'string' ? msg.content : extractContentBlockText(msg.content);
       if (tcId && output) {
         const rec = msg as unknown as Record<string, unknown>;
-        toolResults.set(tcId, { output, isError: !!(rec.is_error ?? rec.isError) });
+          toolResults.set(tcId, { output, isError: !!(rec.is_error ?? rec.isError), timestamp: msg.timestamp || Date.now() } as { output: string; isError?: boolean; timestamp?: number });
       }
     }
     if (Array.isArray(msg.content)) {
@@ -183,7 +209,7 @@ function parseHistoryDetailMessages(history: ChatMessage[]): Message[] {
         if (rec.type === 'tool_result' && extractToolCallId(rec)) {
           const tcId = extractToolCallId(rec)!;
           const output = extractContentBlockText(rec.content) || (rec.output as string) || (rec.text as string) || '';
-          if (output) toolResults.set(tcId, { output, isError: !!(rec.is_error ?? rec.isError) });
+          if (output) toolResults.set(tcId, { output, isError: !!(rec.is_error ?? rec.isError), timestamp: msg.timestamp || Date.now() } as { output: string; isError?: boolean; timestamp?: number });
         }
       }
     }
@@ -194,7 +220,10 @@ function parseHistoryDetailMessages(history: ChatMessage[]): Message[] {
     const role = String(msg.role || '');
     if (role !== 'user' && role !== 'assistant') continue;
 
-    const text = extractTextFromHistoryMessage(msg);
+    let text = extractTextFromHistoryMessage(msg);
+    if (role === 'user') {
+      text = stripTimestampPrefix(stripOperatorInjectedContent(text));
+    }
     let thinking: string | undefined;
     let toolCalls: ToolCall[] | undefined;
     let blocks: MessageBlock[] | undefined;
@@ -214,7 +243,7 @@ function parseHistoryDetailMessages(history: ChatMessage[]): Message[] {
             if (clean) parsedBlocks.push({ type: 'text', content: clean });
           } else if ((rec.type === 'tool_use' || rec.type === 'toolCall') && extractToolCallId(rec)) {
             const tcId = extractToolCallId(rec)!;
-            const result = toolResults.get(tcId);
+            const result = toolResults.get(tcId) as { output: string; isError?: boolean; timestamp?: number } | undefined;
             parsedToolCalls.push({
               id: tcId,
               name: extractToolCallName(rec),
@@ -222,7 +251,7 @@ function parseHistoryDetailMessages(history: ChatMessage[]): Message[] {
               input: stringifyToolPayload(rec.input ?? rec.arguments ?? rec.params),
               output: result?.output,
               startedAt: msg.timestamp || Date.now(),
-              finishedAt: result ? (msg.timestamp || Date.now()) : undefined,
+              finishedAt: result?.timestamp,
             });
             parsedBlocks.push({ type: 'tool', toolCallId: tcId });
           }
@@ -311,6 +340,14 @@ export default function ChatPage() {
   const [historyDetailMessages, setHistoryDetailMessages] = useState<Message[]>([]);
   const [historyDetailLoading, setHistoryDetailLoading] = useState(false);
   const [historyDetailError, setHistoryDetailError] = useState<string | null>(null);
+  const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [fileBrowserRootName, setFileBrowserRootName] = useState('文件');
+  const [fileBrowserPath, setFileBrowserPath] = useState('');
+  const [fileBrowserParentPath, setFileBrowserParentPath] = useState<string | null>(null);
+  const [fileBrowserEntries, setFileBrowserEntries] = useState<FileBrowserEntry[]>([]);
+  const [fileBrowserLoading, setFileBrowserLoading] = useState(false);
+  const [fileBrowserError, setFileBrowserError] = useState<string | null>(null);
+  const [downloadingBrowserPath, setDownloadingBrowserPath] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isUserNearBottomRef = useRef(true);
@@ -391,6 +428,33 @@ export default function ChatPage() {
       cancelled = true;
     };
   }, [showHistoryDetail, currentSessionKey]);
+
+  useEffect(() => {
+    if (!showFileBrowser || !apiClient.gatewayReady) return;
+    let cancelled = false;
+
+    setFileBrowserLoading(true);
+    setFileBrowserError(null);
+
+    apiClient.listFiles(fileBrowserPath)
+      .then((result) => {
+        if (cancelled) return;
+        setFileBrowserRootName(result.rootName);
+        setFileBrowserPath(result.currentPath);
+        setFileBrowserParentPath(result.parentPath);
+        setFileBrowserEntries(result.entries);
+      })
+      .catch((e) => {
+        if (!cancelled) setFileBrowserError((e as Error).message || '加载文件失败');
+      })
+      .finally(() => {
+        if (!cancelled) setFileBrowserLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showFileBrowser, fileBrowserPath]);
 
   const handleSend = useCallback(
     (content: string, attachments?: FileAttachment[]) => {
@@ -583,6 +647,18 @@ export default function ChatPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17h6M9 13h6M9 9h6M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" />
               </svg>
             </button>
+            <button
+              onClick={() => {
+                setFileBrowserPath('');
+                setShowFileBrowser(true);
+              }}
+              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
+              title="文件浏览"
+            >
+              <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+              </svg>
+            </button>
           </div>
         </div>
 
@@ -638,6 +714,37 @@ export default function ChatPage() {
           loading={historyDetailLoading}
           error={historyDetailError}
           onClose={() => setShowHistoryDetail(false)}
+        />
+      )}
+      {showFileBrowser && (
+        <FileBrowserModal
+          rootName={fileBrowserRootName}
+          currentPath={fileBrowserPath}
+          parentPath={fileBrowserParentPath}
+          entries={fileBrowserEntries}
+          loading={fileBrowserLoading}
+          error={fileBrowserError}
+          downloadingPath={downloadingBrowserPath}
+          onClose={() => setShowFileBrowser(false)}
+          onNavigate={(path) => setFileBrowserPath(path)}
+          onDownload={async (path) => {
+            try {
+              setDownloadingBrowserPath(path);
+              const { blob, fileName } = await apiClient.downloadBrowserFile(path);
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = fileName;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(url);
+            } catch (e) {
+              alert((e as Error).message || '下载失败');
+            } finally {
+              setDownloadingBrowserPath(null);
+            }
+          }}
         />
       )}
     </div>
@@ -882,6 +989,102 @@ function HistoryDetailModal({
           <div className="text-sm text-th-text-muted">历史记录为空</div>
         ) : (
           messages.map((msg) => <MessageBubble key={`detail-${msg.id}`} message={msg} />)
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FileBrowserModal({
+  rootName,
+  currentPath,
+  parentPath,
+  entries,
+  loading,
+  error,
+  downloadingPath,
+  onClose,
+  onNavigate,
+  onDownload,
+}: {
+  rootName: string;
+  currentPath: string;
+  parentPath: string | null;
+  entries: FileBrowserEntry[];
+  loading: boolean;
+  error: string | null;
+  downloadingPath: string | null;
+  onClose: () => void;
+  onNavigate: (path: string) => void;
+  onDownload: (path: string) => void | Promise<void>;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 bg-th-base">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-th-border-subtle bg-th-base/95 backdrop-blur-sm safe-area-top">
+        <button
+          onClick={onClose}
+          className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
+          title="关闭"
+        >
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          </svg>
+        </button>
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-medium text-th-text truncate">{rootName}</h2>
+          <p className="text-xs text-th-text-dim truncate">/{currentPath || ''}</p>
+        </div>
+        {parentPath !== null && (
+          <button
+            onClick={() => onNavigate(parentPath)}
+            className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
+          >
+            返回上级
+          </button>
+        )}
+      </div>
+
+      <div
+        className="overflow-y-auto px-4 py-4"
+        style={{ height: 'calc(100vh - env(safe-area-inset-top, 0px) - 57px)' }}
+      >
+        {loading ? (
+          <div className="text-sm text-th-text-muted">正在加载文件...</div>
+        ) : error ? (
+          <div className="text-sm text-red-400">{error}</div>
+        ) : entries.length === 0 ? (
+          <div className="text-sm text-th-text-muted">当前目录为空</div>
+        ) : (
+          <div className="space-y-2">
+            {entries.map((entry) => (
+              <button
+                key={entry.path}
+                onClick={() => entry.isDirectory ? onNavigate(entry.path) : onDownload(entry.path)}
+                className="w-full flex items-center gap-3 rounded-xl border border-th-border/40 bg-th-surface px-3 py-3 text-left hover:bg-th-hover/40"
+              >
+                <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${entry.isDirectory ? 'bg-blue-500/15 text-blue-300' : 'bg-emerald-500/15 text-emerald-300'}`}>
+                  {entry.isDirectory ? (
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 16V4m0 12l-4-4m4 4l4-4m5 8v1a2 2 0 01-2 2H5a2 2 0 01-2-2v-1" />
+                    </svg>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-th-text truncate">{entry.name}</div>
+                  <div className="text-[11px] text-th-text-dim">
+                    {entry.isDirectory ? '文件夹' : `${(entry.size / 1024).toFixed(entry.size > 1024 ? 1 : 0)} KB`} · {new Date(entry.modifiedAt).toLocaleString('zh-CN')}
+                  </div>
+                </div>
+                {!entry.isDirectory && downloadingPath === entry.path && (
+                  <span className="text-xs text-emerald-300 shrink-0">下载中...</span>
+                )}
+              </button>
+            ))}
+          </div>
         )}
       </div>
     </div>

@@ -1703,7 +1703,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         }
 
         // ====== 预处理：收集 Gateway 中的 tool_result（用于恢复工具调用输出）======
-        const gwToolResults = new Map<string, { output: string; isError?: boolean }>();
+        const gwToolResults = new Map<string, { output: string; isError?: boolean; timestamp?: number }>();
         for (const msg of result.messages) {
           const role = msg.role as string;
 
@@ -1722,6 +1722,7 @@ export const useChatStore = create<ChatState>((set, get) => {
                 gwToolResults.set(tcId, {
                   output,
                   isError: !!(msgRec.is_error ?? msgRec.isError),
+                  timestamp: msg.timestamp || Date.now(),
                 });
               }
             }
@@ -1735,7 +1736,7 @@ export const useChatStore = create<ChatState>((set, get) => {
                 const tcId = (b.tool_use_id || b.id) as string;
                 const output = extractContentBlockText(b.content) || (b.output as string) || (b.text as string) || '';
                 if (output) {
-                  gwToolResults.set(tcId, { output, isError: !!(b.is_error) });
+                  gwToolResults.set(tcId, { output, isError: !!(b.is_error), timestamp: msg.timestamp || Date.now() });
                 }
               }
             }
@@ -1951,7 +1952,7 @@ export const useChatStore = create<ChatState>((set, get) => {
                     input: inputStr,
                     output: resultInfo?.output,
                     startedAt: msg.timestamp || Date.now(),
-                    finishedAt: resultInfo ? (msg.timestamp || Date.now()) : undefined,
+                    finishedAt: resultInfo?.timestamp,
                   });
                   parsedBlocks.push({ type: 'tool', toolCallId: tcId });
                 }

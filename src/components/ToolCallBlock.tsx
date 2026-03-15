@@ -92,6 +92,14 @@ function truncate(text: string, maxLen: number): string {
   return text.substring(0, maxLen) + '…';
 }
 
+function formatDuration(startedAt?: number, finishedAt?: number): string | null {
+  if (!startedAt || !finishedAt) return null;
+  const diff = finishedAt - startedAt;
+  if (diff <= 0) return null;
+  if (diff < 1000) return `${diff}ms`;
+  return `${(diff / 1000).toFixed(diff < 10000 ? 1 : 0)}s`;
+}
+
 /**
  * 根据工具名称和输入生成人类可读的摘要
  * 参考 OpenClaw Dashboard 风格：`with [动作] [参数摘要]`
@@ -190,9 +198,7 @@ export default function ToolCallBlock({ toolCall }: ToolCallBlockProps) {
     [toolCall.name, toolCall.input],
   );
 
-  const duration = toolCall.startedAt && toolCall.finishedAt
-    ? ((toolCall.finishedAt - toolCall.startedAt) / 1000).toFixed(1) + 's'
-    : null;
+  const duration = formatDuration(toolCall.startedAt, toolCall.finishedAt);
 
   return (
     <div className={`my-1.5 rounded-xl border overflow-hidden ${

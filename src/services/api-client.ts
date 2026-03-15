@@ -5,7 +5,7 @@
  * 架构：手机 ←SSE+POST→ 代理服务端 ←WS→ OpenClaw Gateway
  */
 
-import type { ConnectionStatus, GatewayMessage, MessageBlock, ToolCall } from '../types';
+import type { ConnectionStatus, FileBrowserEntry, GatewayMessage, MessageBlock, ToolCall } from '../types';
 
 const REQUEST_TIMEOUT = 30000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -596,6 +596,58 @@ export class ApiClient {
         Authorization: `Bearer ${this._token}`,
       },
       body: JSON.stringify({ path }),
+    });
+
+    if (!res.ok) {
+      let message = '下载失败';
+      try {
+        const data = await res.json();
+        message = data?.error || message;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(message);
+    }
+
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') || '';
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const fallbackMatch = disposition.match(/filename="?([^"]+)"?/i);
+    const fileName = utf8Match
+      ? decodeURIComponent(utf8Match[1])
+      : (fallbackMatch?.[1] || path.split(/[\\/]/).pop() || 'download.bin');
+
+    return { blob, fileName };
+  }
+
+  async listFiles(path = ''): Promise<{
+    rootName: string;
+    currentPath: string;
+    parentPath: string | null;
+    entries: FileBrowserEntry[];
+  }> {
+    if (!this._baseUrl || !this._sid) throw new Error('未连接');
+
+    const res = await fetch(
+      `${this._baseUrl}/api/files?sid=${encodeURIComponent(this._sid)}&path=${encodeURIComponent(path)}`
+    );
+    const data = await res.json();
+    if (!res.ok || !data?.ok) throw new Error(data?.error || '加载文件列表失败');
+    return {
+      rootName: data.rootName || '文件',
+      currentPath: data.currentPath || '',
+      parentPath: data.parentPath || null,
+      entries: data.entries || [],
+    };
+  }
+
+  async downloadBrowserFile(path: string): Promise<{ blob: Blob; fileName: string }> {
+    if (!this._baseUrl || !this._sid) throw new Error('未连接');
+
+    const res = await fetch(`${this._baseUrl}/api/files/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sid: this._sid, path }),
     });
 
     if (!res.ok) {

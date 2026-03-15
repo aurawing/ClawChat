@@ -76,6 +76,9 @@ if (!existsSync(ENV_PATH)) {
     '# 例如: DOWNLOAD_PATH_MAPS=/root/.openclaw/workspace=>../workspace',
     'DOWNLOAD_PATH_MAPS=',
     '',
+    '# APP 文件浏览页固定根目录（相对 server/ 或绝对路径）',
+    'FILE_BROWSER_ROOT=../workspace',
+    '',
     '# 日志级别: error / warn / info / debug / trace',
     '# trace 级别会打印与 Gateway 交互的所有完整 JSON 帧',
     'LOG_LEVEL=info',
@@ -101,6 +104,7 @@ const CONFIG = {
     .filter(Boolean)
     .map((p) => resolve(__dirname, p)),
   downloadPathMaps: parseDownloadPathMaps(process.env.DOWNLOAD_PATH_MAPS),
+  fileBrowserRoot: process.env.FILE_BROWSER_ROOT ? resolve(__dirname, process.env.FILE_BROWSER_ROOT) : null,
   distPath: join(__dirname, '..', 'dist'),
 };
 
@@ -443,6 +447,41 @@ function resolveDownloadableFilePath(rawPath) {
     };
   }
   return null;
+}
+
+function getFileBrowserRoot() {
+  if (!CONFIG.fileBrowserRoot) return null;
+  if (!existsSync(CONFIG.fileBrowserRoot)) return null;
+  try {
+    if (!statSync(CONFIG.fileBrowserRoot).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  return CONFIG.fileBrowserRoot;
+}
+
+function normalizeBrowserRelativePath(rawPath) {
+  return String(rawPath || '')
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .replace(/\/+/g, '/')
+    .trim();
+}
+
+function resolveBrowserPath(rawPath = '') {
+  const root = getFileBrowserRoot();
+  if (!root) return null;
+
+  const relativePath = normalizeBrowserRelativePath(rawPath);
+  const absolutePath = resolve(root, relativePath || '.');
+  if (!isPathWithinRoot(absolutePath, root) || !existsSync(absolutePath)) return null;
+
+  try {
+    const stat = statSync(absolutePath);
+    return { root, relativePath, absolutePath, stat };
+  } catch {
+    return null;
+  }
 }
 
 // ==================== 会话管理 ====================
@@ -1154,6 +1193,71 @@ app.post('/api/disconnect', (req, res) => {
   const { sid } = req.body || {};
   if (sessions.has(sid)) cleanupSession(sid);
   res.json({ ok: true });
+});
+
+/** GET /api/files — 浏览固定根目录下的文件和子目录 */
+app.get('/api/files', (req, res) => {
+  const sid = String(req.query.sid || '');
+  const session = sessions.get(sid);
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+
+  const resolved = resolveBrowserPath(String(req.query.path || ''));
+  if (!resolved) {
+    return res.status(400).json({ ok: false, error: '文件浏览根目录未配置或路径无效' });
+  }
+  if (!resolved.stat.isDirectory()) {
+    return res.status(400).json({ ok: false, error: '当前路径不是目录' });
+  }
+
+  const entries = readdirSync(resolved.absolutePath, { withFileTypes: true })
+    .map((dirent) => {
+      const fullPath = join(resolved.absolutePath, dirent.name);
+      const stat = statSync(fullPath);
+      const childRelativePath = normalizeBrowserRelativePath(join(resolved.relativePath, dirent.name));
+      return {
+        name: dirent.name,
+        path: childRelativePath,
+        isDirectory: dirent.isDirectory(),
+        size: dirent.isDirectory() ? 0 : stat.size,
+        modifiedAt: stat.mtimeMs || stat.mtime.getTime(),
+      };
+    })
+    .sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+      return a.name.localeCompare(b.name, 'zh-CN');
+    });
+
+  const parentPath = resolved.relativePath
+    ? resolved.relativePath.split('/').slice(0, -1).join('/') || ''
+    : null;
+
+  res.json({
+    ok: true,
+    rootName: basename(resolved.root),
+    currentPath: resolved.relativePath,
+    parentPath,
+    entries,
+  });
+});
+
+/** POST /api/files/download — 下载固定根目录下的文件 */
+app.post('/api/files/download', (req, res) => {
+  const { sid, path: rawPath } = req.body || {};
+  const session = sessions.get(String(sid || ''));
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+
+  const resolved = resolveBrowserPath(String(rawPath || ''));
+  if (!resolved) {
+    return res.status(400).json({ ok: false, error: '路径无效' });
+  }
+  if (!resolved.stat.isFile()) {
+    return res.status(400).json({ ok: false, error: '只能下载文件' });
+  }
+
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(basename(resolved.absolutePath))}`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(resolved.absolutePath);
 });
 
 /** GET /api/progress */
