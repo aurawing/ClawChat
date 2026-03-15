@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { Directory, Filesystem } from '@capacitor/filesystem';
 import { useChatStore } from '../stores/chatStore';
 import { apiClient } from '../services/api-client';
 import MessageBubble from '../components/MessageBubble';
@@ -6,6 +8,8 @@ import ChatInput from '../components/ChatInput';
 import SessionList from '../components/SessionList';
 import { useTheme } from '../hooks/useTheme';
 import type { ChatMessage, ContentBlock, FileAttachment, FileBrowserEntry, Message, MessageBlock, ServerConfig, ToolCall } from '../types';
+
+const APP_DOWNLOAD_SUBDIR = 'ClawChat';
 
 function normalizeAssistantBlocks(message: Message): MessageBlock[] {
   if (message.blocks?.length) {
@@ -299,6 +303,96 @@ function parseHistoryDetailMessages(history: ChatMessage[]): Message[] {
   }
 
   return messages;
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new Error('文件转换失败'));
+        return;
+      }
+      const base64 = result.split(',')[1];
+      if (!base64) {
+        reject(new Error('文件转换失败'));
+        return;
+      }
+      resolve(base64);
+    };
+    reader.onerror = () => reject(reader.error || new Error('文件转换失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function saveBlobWithPicker(blob: Blob, fileName: string): Promise<boolean> {
+  const picker = (window as Window & {
+    showSaveFilePicker?: (options?: Record<string, unknown>) => Promise<{
+      createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+    }>;
+  }).showSaveFilePicker;
+
+  if (!picker) return false;
+
+  const handle = await picker({ suggestedName: fileName });
+  const writable = await handle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+  return true;
+}
+
+async function fallbackBrowserDownload(blob: Blob, fileName: string): Promise<void> {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function saveBlobToNativeDocuments(blob: Blob, fileName: string): Promise<string> {
+  try {
+    const perms = await Filesystem.checkPermissions();
+    if (perms.publicStorage !== 'granted') {
+      await Filesystem.requestPermissions();
+    }
+  } catch {
+    // iOS / Web 或不需要权限时会直接继续
+  }
+
+  const base64 = await blobToBase64(blob);
+  const path = `${APP_DOWNLOAD_SUBDIR}/${fileName}`;
+  await Filesystem.writeFile({
+    path,
+    data: base64,
+    directory: Directory.Documents,
+    recursive: true,
+  });
+  const { uri } = await Filesystem.getUri({
+    path,
+    directory: Directory.Documents,
+  });
+  return uri || path;
+}
+
+async function saveDownloadedFile(blob: Blob, fileName: string): Promise<string | null> {
+  if (Capacitor.isNativePlatform()) {
+    return saveBlobToNativeDocuments(blob, fileName);
+  }
+
+  let usedPicker = false;
+  try {
+    usedPicker = await saveBlobWithPicker(blob, fileName);
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') return null;
+  }
+  if (!usedPicker) {
+    await fallbackBrowserDownload(blob, fileName);
+  }
+  return null;
 }
 
 /**
@@ -731,14 +825,10 @@ export default function ChatPage() {
             try {
               setDownloadingBrowserPath(path);
               const { blob, fileName } = await apiClient.downloadBrowserFile(path);
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = fileName;
-              document.body.appendChild(a);
-              a.click();
-              a.remove();
-              URL.revokeObjectURL(url);
+              const savedLocation = await saveDownloadedFile(blob, fileName);
+              if (savedLocation) {
+                alert(`已保存到 Documents/${APP_DOWNLOAD_SUBDIR}\n\n${savedLocation}`);
+              }
             } catch (e) {
               alert((e as Error).message || '下载失败');
             } finally {
@@ -1046,7 +1136,10 @@ function FileBrowserModal({
 
       <div
         className="overflow-y-auto px-4 py-4"
-        style={{ height: 'calc(100vh - env(safe-area-inset-top, 0px) - 57px)' }}
+        style={{
+          height: 'calc(100vh - env(safe-area-inset-top, 0px) - 57px)',
+          paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
+        }}
       >
         {loading ? (
           <div className="text-sm text-th-text-muted">正在加载文件...</div>
@@ -1056,6 +1149,11 @@ function FileBrowserModal({
           <div className="text-sm text-th-text-muted">当前目录为空</div>
         ) : (
           <div className="space-y-2">
+            <div className="text-[11px] text-th-text-dim px-1">
+              {Capacitor.isNativePlatform()
+                ? `下载文件会保存到 Documents/${APP_DOWNLOAD_SUBDIR}`
+                : '下载文件会弹出另存为窗口；若浏览器不支持，则回退到默认下载目录'}
+            </div>
             {entries.map((entry) => (
               <button
                 key={entry.path}
