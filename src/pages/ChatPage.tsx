@@ -1,10 +1,125 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useChatStore } from '../stores/chatStore';
 import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import SessionList from '../components/SessionList';
 import { useTheme } from '../hooks/useTheme';
-import type { FileAttachment, Message, ServerConfig } from '../types';
+import type { FileAttachment, Message, MessageBlock, ServerConfig, ToolCall } from '../types';
+
+function normalizeAssistantBlocks(message: Message): MessageBlock[] {
+  if (message.blocks?.length) {
+    return message.blocks.filter((block) => block.type !== 'thinking');
+  }
+
+  const blocks: MessageBlock[] = [];
+  if (message.toolCalls?.length) {
+    for (const tc of message.toolCalls) {
+      blocks.push({ type: 'tool', toolCallId: tc.id });
+    }
+  }
+  if (message.content.trim()) {
+    blocks.push({ type: 'text', content: message.content });
+  }
+  return blocks;
+}
+
+function buildSegmentMessage(base: Message, index: number, blocks: MessageBlock[], toolCallMap: Map<string, ToolCall>): Message {
+  const toolIds = blocks
+    .filter((block) => block.type === 'tool' && block.toolCallId)
+    .map((block) => block.toolCallId!);
+
+  const text = blocks
+    .filter((block) => block.type === 'text' && block.content)
+    .map((block) => block.content!)
+    .join('\n\n')
+    .trim();
+
+  return {
+    ...base,
+    id: `${base.id}::seg-${index}`,
+    content: text,
+    thinking: undefined,
+    toolCalls: toolIds.map((id) => toolCallMap.get(id)).filter(Boolean) as ToolCall[],
+    blocks,
+    isStreaming: base.isStreaming && index >= 0,
+  };
+}
+
+function splitAssistantMessage(message: Message): Message[] {
+  if (message.role !== 'assistant') return [message];
+
+  const sourceBlocks = normalizeAssistantBlocks(message);
+  if (!sourceBlocks.length) {
+    return [{ ...message, thinking: undefined }];
+  }
+
+  const toolCallMap = new Map<string, ToolCall>();
+  if (message.toolCalls) {
+    for (const tc of message.toolCalls) toolCallMap.set(tc.id, tc);
+  }
+
+  const segments: Message[] = [];
+  let current: MessageBlock[] = [];
+  let hasText = false;
+  let hasTool = false;
+
+  const flush = () => {
+    if (!current.length) return;
+    segments.push(buildSegmentMessage(message, segments.length, current, toolCallMap));
+    current = [];
+    hasText = false;
+    hasTool = false;
+  };
+
+  for (const block of sourceBlocks) {
+    if (block.type === 'tool') {
+      if (hasText) flush();
+      current.push(block);
+      hasTool = true;
+      continue;
+    }
+
+    if (block.type === 'text' && block.content?.trim()) {
+      current.push({ ...block, content: block.content.trim() });
+      hasText = true;
+      if (hasTool) flush();
+    }
+  }
+
+  if (current.length) {
+    // 流式阶段最后一段可能只有新工具、正文尚未返回。
+    // 这时先把工具挂在上一轮气泡里，等正文到达后再正式拆成新一轮，
+    // 避免底部长期悬着一个孤立的工具卡。
+    if (hasTool && !hasText && segments.length > 0) {
+      const last = segments[segments.length - 1];
+      const mergedBlocks = [...(last.blocks || []), ...current];
+      segments[segments.length - 1] = buildSegmentMessage(message, segments.length - 1, mergedBlocks, toolCallMap);
+    } else {
+      flush();
+    }
+  }
+
+  if (!segments.length) {
+    return [{ ...message, thinking: undefined, blocks: undefined }];
+  }
+
+  return segments.map((segment, index) => ({
+    ...segment,
+    isStreaming: message.isStreaming ? index === segments.length - 1 : false,
+  }));
+}
+
+function expandAssistantMessages(messages: Message[]): Message[] {
+  const expanded: Message[] = [];
+  for (const message of messages) {
+    if (message.role !== 'assistant') {
+      expanded.push(message);
+      continue;
+    }
+    expanded.push(...splitAssistantMessage(message));
+  }
+  return expanded;
+}
 
 /**
  * 聊天主页面
@@ -158,6 +273,8 @@ export default function ChatPage() {
     }
   }
 
+  const renderedMessages = useMemo(() => expandAssistantMessages(displayMessages), [displayMessages]);
+
   const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiThinking && !currentAiMessageId;
 
   const currentSession = sessions.find((s) => s.key === currentSessionKey);
@@ -276,16 +393,6 @@ export default function ChatPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
             </button>
-            {/* 断开连接 */}
-            <button
-              onClick={disconnect}
-              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
-              title="断开连接"
-            >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-              </svg>
-            </button>
           </div>
         </div>
 
@@ -295,7 +402,7 @@ export default function ChatPage() {
             <EmptyState />
           ) : (
             <>
-              {displayMessages.map((msg) => (
+              {renderedMessages.map((msg) => (
                 <MessageBubble key={msg.id} message={msg} />
               ))}
               {showThinkingPlaceholder && <ThinkingPlaceholder />}

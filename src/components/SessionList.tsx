@@ -214,9 +214,6 @@ function SessionItem({
       >
         <div className="flex-1 min-w-0">
           <p className="text-sm text-th-text-secondary truncate">{session.title}</p>
-          {session.lastMessage && (
-            <p className="text-xs text-th-text-dim truncate mt-0.5">{session.lastMessage}</p>
-          )}
         </div>
         <div className="flex items-center gap-2 ml-2 shrink-0">
           <span className="text-xs text-th-text-faint">{formatTime(session.updatedAt)}</span>

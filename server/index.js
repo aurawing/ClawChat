@@ -19,12 +19,12 @@ import express from 'express';
 import { createServer } from 'http';
 import { WebSocket } from 'ws';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, resolve, normalize, basename, extname } from 'path';
 import {
   randomUUID, randomBytes, generateKeyPairSync, createHash,
   sign as ed25519Sign, createPrivateKey,
 } from 'crypto';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, rmSync, statSync } from 'fs';
 import Database from 'better-sqlite3';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -55,6 +55,10 @@ if (!existsSync(ENV_PATH)) {
     '# OpenClaw Gateway 认证密码（优先于 token）',
     'OPENCLAW_GATEWAY_PASSWORD=',
     '',
+    '# 允许下载的构建产物目录（逗号分隔，支持相对 server/ 的路径）',
+    '# 例如: DOWNLOAD_ROOTS=../dist,../android/app/build/outputs,../release',
+    'DOWNLOAD_ROOTS=../dist,../android/app/build/outputs,../build,../out,../release',
+    '',
     '# 日志级别: error / warn / info / debug / trace',
     '# trace 级别会打印与 Gateway 交互的所有完整 JSON 帧',
     'LOG_LEVEL=info',
@@ -74,6 +78,11 @@ const CONFIG = {
   gatewayUrl: process.env.OPENCLAW_GATEWAY_URL || 'ws://127.0.0.1:18789',
   gatewayToken: process.env.OPENCLAW_GATEWAY_TOKEN || '',
   gatewayPassword: process.env.OPENCLAW_GATEWAY_PASSWORD || '',
+  downloadRoots: (process.env.DOWNLOAD_ROOTS || '../dist,../android/app/build/outputs,../build,../out,../release')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((p) => resolve(__dirname, p)),
   distPath: join(__dirname, '..', 'dist'),
 };
 
@@ -350,6 +359,59 @@ function validateToken(token, username) {
   if (!CONFIG.proxyToken) return { valid: true, userId: username || null };
   if (token === CONFIG.proxyToken) return { valid: true, userId: username || null };
   return { valid: false, userId: null };
+}
+
+function extractBearerToken(req) {
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (/^Bearer\s+/i.test(authHeader)) {
+    return authHeader.replace(/^Bearer\s+/i, '').trim();
+  }
+  return String(req.headers['x-proxy-token'] || '').trim();
+}
+
+function authenticateByToken(req) {
+  const token = extractBearerToken(req);
+  if (!token) return { valid: false, userId: null };
+  return validateToken(token, null);
+}
+
+function isPathWithinRoot(targetPath, rootPath) {
+  const normalizedTarget = normalize(resolve(targetPath));
+  const normalizedRoot = normalize(resolve(rootPath));
+  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(normalizedRoot + '\\') || normalizedTarget.startsWith(normalizedRoot + '/');
+}
+
+function resolveDownloadableFilePath(rawPath) {
+  if (!rawPath || typeof rawPath !== 'string') return null;
+  const normalizedInput = rawPath.trim().replace(/^["']|["']$/g, '');
+  if (!normalizedInput) return null;
+
+  const candidates = normalizedInput.match(/^[A-Za-z]:[\\/]/) || normalizedInput.startsWith('/')
+    ? [resolve(normalizedInput)]
+    : [
+        resolve(process.cwd(), normalizedInput),
+        ...CONFIG.downloadRoots.map((root) => resolve(root, normalizedInput)),
+      ];
+
+  for (const resolvedPath of candidates) {
+    const allowedRoot = CONFIG.downloadRoots.find((root) => isPathWithinRoot(resolvedPath, root));
+    if (!allowedRoot || !existsSync(resolvedPath)) continue;
+
+    try {
+      const stat = statSync(resolvedPath);
+      if (!stat.isFile()) continue;
+    } catch {
+      continue;
+    }
+
+    return {
+      absolutePath: resolvedPath,
+      allowedRoot,
+      fileName: basename(resolvedPath),
+      ext: extname(resolvedPath).toLowerCase(),
+    };
+  }
+  return null;
 }
 
 // ==================== 会话管理 ====================
@@ -1129,8 +1191,33 @@ app.get('/api/attachment/:id', (req, res) => {
   if (!existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
 
   res.setHeader('Content-Type', row.mime_type);
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(row.file_name)}`);
   res.setHeader('Cache-Control', 'public, max-age=31536000, immutable'); // 附件不变，长缓存
   res.sendFile(filePath);
+});
+
+/** POST /api/download-file — 下载受限目录中的构建产物 */
+app.post('/api/download-file', (req, res) => {
+  const auth = authenticateByToken(req);
+  if (!auth.valid) {
+    return res.status(401).json({ ok: false, error: '认证失败：无效的连接密码' });
+  }
+
+  const requestedPath = String(req.body?.path || '').trim();
+  if (!requestedPath) {
+    return res.status(400).json({ ok: false, error: '缺少 path' });
+  }
+
+  const resolved = resolveDownloadableFilePath(requestedPath);
+  if (!resolved) {
+    return res.status(403).json({ ok: false, error: '文件不存在或不在允许下载的目录中' });
+  }
+
+  log.info(`下载构建产物: ${resolved.fileName} <= ${resolved.absolutePath} userId=${auth.userId || 'default'}`);
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(resolved.fileName)}`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(resolved.absolutePath);
 });
 
 /** POST /api/message-meta — 保存助手消息元数据（工具调用、思维链、blocks） */

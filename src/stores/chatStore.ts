@@ -108,7 +108,7 @@ function extractRawMessageText(message?: ChatMessage): string {
       if (block.type === 'text' && typeof block.text === 'string') {
         texts.push(block.text);
       }
-      const rec = block as Record<string, unknown>;
+      const rec = block as unknown as Record<string, unknown>;
       if (block.type === 'thinking' && typeof rec.thinking === 'string') {
         texts.push(`<thinking>${rec.thinking as string}</thinking>`);
       }
@@ -406,8 +406,8 @@ function hasAssistantMetaContent(message?: ChatMessage): boolean {
   }
   if (Array.isArray(message.content)) {
     return message.content.some((block) => {
-      const b = block as Record<string, unknown>;
-      if (b.type === 'tool_use' || b.type === 'thinking') return true;
+      const b = block as unknown as Record<string, unknown>;
+      if (b.type === 'tool_use' || b.type === 'toolCall' || b.type === 'thinking') return true;
       if (b.type === 'text' && typeof b.text === 'string') {
         return !!extractThinkingContent(b.text as string);
       }
@@ -415,6 +415,19 @@ function hasAssistantMetaContent(message?: ChatMessage): boolean {
     });
   }
   return false;
+}
+
+function extractToolCallId(rec: Record<string, unknown>): string | undefined {
+  return (rec.tool_use_id || rec.tool_call_id || rec.toolCallId || rec.id) as string | undefined;
+}
+
+function extractToolCallName(rec: Record<string, unknown>): string {
+  return ((rec.name as string) || (rec.tool_name as string) || (rec.toolName as string) || 'tool');
+}
+
+function stringifyToolPayload(payload: unknown): string | undefined {
+  if (payload === undefined || payload === null || payload === '') return undefined;
+  return typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
 }
 
 /** 快照当前 blocks（补全最后一个 thinking 段 + 剩余文本段） */
@@ -522,6 +535,23 @@ interface BgStreamState {
   createdAt: number;
 }
 const bgStreams = new Map<string, BgStreamState>();
+let historyRequestSerial = 0;
+let sessionViewVersion = 0;
+
+function stripThinkingBlocks(blocks?: MessageBlock[]): MessageBlock[] | undefined {
+  if (!blocks?.length) return undefined;
+  const filtered = blocks.filter((block) => block.type !== 'thinking');
+  return filtered.length > 0 ? filtered : undefined;
+}
+
+function hideThinkingForDisplay(message: Message): Message {
+  if (message.role !== 'assistant') return message;
+  return {
+    ...message,
+    thinking: undefined,
+    blocks: stripThinkingBlocks(message.blocks),
+  };
+}
 
 /** 处理非当前会话的 agent 事件 — 后台缓冲 */
 function _bgHandleAgentEvent(payload: AgentEventPayload) {
@@ -1369,6 +1399,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           userId: resolvedUserId,
           username: config.username || apiClient.userId || null,
         });
+        sessionViewVersion++;
 
         // 保存当前 sessionKey（确保下次打开时能恢复）
         if (finalSessionKey) {
@@ -1388,6 +1419,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     disconnect: () => {
       apiClient.disconnect();
+      sessionViewVersion++;
       set({
         connectionStatus: 'disconnected',
         serverConfig: null,
@@ -1506,6 +1538,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     switchSession: (key: string) => {
       const state = get();
+      const viewVersion = ++sessionViewVersion;
       // ——— 切换前：保存正在流式输出的 AI 消息到 DB + bgStreams ———
       _saveStreamingStateToDb(state);
 
@@ -1566,6 +1599,39 @@ export const useChatStore = create<ChatState>((set, get) => {
           isStreaming: true,
         });
         bgStreams.delete(key);
+        db.getMessages(key)
+          .then((localMessages) => {
+            const current = get();
+            if (sessionViewVersion !== viewVersion || current.currentSessionKey !== key || current.currentAiMessageId !== bg.msgId) return;
+
+            const partialMsg = localMessages.find((m) => m.id === bg.msgId);
+            const mergedText = partialMsg && partialMsg.content.length > current.currentAiText.length
+              ? partialMsg.content
+              : current.currentAiText;
+            const mergedToolCards = new Map(current.toolCards);
+            if (partialMsg?.toolCalls?.length) {
+              for (const tc of partialMsg.toolCalls) {
+                const existing = mergedToolCards.get(tc.id);
+                mergedToolCards.set(tc.id, existing ? { ...tc, ...existing } : tc);
+              }
+            }
+            const mergedBlocks = stripThinkingBlocks(partialMsg?.blocks?.length ? partialMsg.blocks : current.currentBlocks) || [];
+
+            set({
+              messages: localMessages
+                .filter((m) => m.id !== bg.msgId)
+                .map(hideThinkingForDisplay),
+              currentAiText: mergedText,
+              currentAiThinking: '',
+              toolCards: mergedToolCards,
+              currentBlocks: mergedBlocks,
+              _blockThinkingBase: 0,
+              _blockTextBase: mergedText.length,
+              isStreaming: true,
+            });
+          })
+          .catch(() => {});
+        return;
       }
 
       get().loadHistory();
@@ -1578,6 +1644,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     createNewSession: () => {
       // 切换前保存当前流式状态
       _saveStreamingStateToDb(get());
+      sessionViewVersion++;
 
       const baseKey = apiClient.sessionKey;
       if (!baseKey) return;
@@ -1613,16 +1680,24 @@ export const useChatStore = create<ChatState>((set, get) => {
       const state = get();
       const sessionKey = state.currentSessionKey;
       if (!sessionKey || !apiClient.gatewayReady) return;
+      const requestSerial = ++historyRequestSerial;
+      const viewVersion = sessionViewVersion;
 
       try {
         const result = (await apiClient.chatHistory(sessionKey)) as {
           messages?: ChatMessage[];
         };
+        if (requestSerial !== historyRequestSerial || viewVersion !== sessionViewVersion || get().currentSessionKey !== sessionKey) {
+          return;
+        }
         if (!result?.messages?.length) {
           // Gateway 无记录，尝试加载本地 DB
           const localMessages = await db.getMessages(sessionKey);
+          if (requestSerial !== historyRequestSerial || viewVersion !== sessionViewVersion || get().currentSessionKey !== sessionKey) {
+            return;
+          }
           if (localMessages.length > 0) {
-            set({ messages: localMessages });
+            set({ messages: localMessages.map(hideThinkingForDisplay) });
           }
           return;
         }
@@ -1634,8 +1709,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
           // 工具角色消息 — 可能是 string 或 array content
           if (role === 'tool' || role === 'tool_result' || role === 'toolResult') {
-            const tcId = (msg as Record<string, unknown>).tool_use_id as string
-              || (msg as Record<string, unknown>).tool_call_id as string;
+            const tcId = extractToolCallId(msg as Record<string, unknown>);
             if (tcId) {
               let output = '';
               if (typeof msg.content === 'string') {
@@ -1643,14 +1717,20 @@ export const useChatStore = create<ChatState>((set, get) => {
               } else if (Array.isArray(msg.content)) {
                 output = extractContentBlockText(msg.content) || '';
               }
-              if (output) gwToolResults.set(tcId, { output, isError: !!(msg as Record<string, unknown>).is_error });
+              if (output) {
+                const msgRec = msg as Record<string, unknown>;
+                gwToolResults.set(tcId, {
+                  output,
+                  isError: !!(msgRec.is_error ?? msgRec.isError),
+                });
+              }
             }
           }
 
           // 用户消息中可能嵌入 tool_result 块（Anthropic 格式）
           if (Array.isArray(msg.content)) {
             for (const block of msg.content as ContentBlock[]) {
-              const b = block as Record<string, unknown>;
+              const b = block as unknown as Record<string, unknown>;
               if (b.type === 'tool_result' && (b.tool_use_id || b.id)) {
                 const tcId = (b.tool_use_id || b.id) as string;
                 const output = extractContentBlockText(b.content) || (b.output as string) || (b.text as string) || '';
@@ -1847,7 +1927,7 @@ export const useChatStore = create<ChatState>((set, get) => {
               const parsedBlocks: MessageBlock[] = [];
               let hasThinkingBlock = false;
               for (const block of msg.content as ContentBlock[]) {
-                const b = block as Record<string, unknown>;
+                const b = block as unknown as Record<string, unknown>;
                 if (b.type === 'thinking' && typeof b.thinking === 'string') {
                   // Anthropic 格式 thinking block
                   parsedBlocks.push({ type: 'thinking', content: b.thinking as string });
@@ -1857,13 +1937,11 @@ export const useChatStore = create<ChatState>((set, get) => {
                   const clean = stripThinkingTags(b.text as string);
                   if (thk) parsedBlocks.push({ type: 'thinking', content: thk });
                   if (clean.trim()) parsedBlocks.push({ type: 'text', content: clean.trim() });
-                } else if (b.type === 'tool_use' && (b.id || b.tool_use_id)) {
-                  const tcId = (b.id || b.tool_use_id) as string;
-                  const tcName = (b.name as string) || 'tool';
-                  const inputRaw = b.input;
-                  const inputStr = inputRaw
-                    ? (typeof inputRaw === 'string' ? inputRaw : JSON.stringify(inputRaw, null, 2))
-                    : undefined;
+                } else if ((b.type === 'tool_use' || b.type === 'toolCall') && extractToolCallId(b)) {
+                  const tcId = extractToolCallId(b)!;
+                  const tcName = extractToolCallName(b);
+                  const inputRaw = b.input ?? b.arguments ?? b.params;
+                  const inputStr = stringifyToolPayload(inputRaw);
                   // 查找对应的 tool_result
                   const resultInfo = gwToolResults.get(tcId);
                   parsedTc.push({
@@ -1892,9 +1970,11 @@ export const useChatStore = create<ChatState>((set, get) => {
             const rawTextContent = typeof msg.content === 'string' ? msg.content : '';
             const tagThinking = rawTextContent ? extractThinkingContent(rawTextContent) : '';
 
+            const hasGatewayStructuredMeta = !!(gwBlocks?.length || gwToolCalls?.length || gwThinking || tagThinking);
+
             // ③ 从服务端元数据恢复（先按 ID，再按工具名列表匹配）
             let sMeta = msgId ? serverMetaById.get(msgId) : undefined;
-            if (!sMeta && gwToolCalls?.length) {
+            if (!sMeta && !hasGatewayStructuredMeta && gwToolCalls?.length) {
               const toolKey = gwToolCalls.map((tc: ToolCall) => tc.name).sort().join(',');
               if (toolKey) sMeta = serverMetaByText.get(toolKey);
             }
@@ -1916,14 +1996,20 @@ export const useChatStore = create<ChatState>((set, get) => {
               && !localTc
               && !localThk
               && !localBlk;
-            if (localSeqMeta) localAssistantMetaIdx++;
+            if (canUseLocalSeqMeta) localAssistantMetaIdx++;
 
             // 合并结果：
-            // toolCalls/thinking 优先使用更完整的数据；
-            // blocks 优先使用我们运行时持久化的真实时序，最后才回退到 Gateway 原始顺序。
-            toolCalls = sMeta?.toolCalls || localTc || gwToolCalls || (canUseLocalSeqMeta ? localSeqMeta.toolCalls : undefined) || undefined;
-            thinking = sMeta?.thinking || localThk || gwThinking || tagThinking || (canUseLocalSeqMeta ? localSeqMeta.thinking : undefined) || undefined;
-            blocks = sMeta?.blocks || localBlk || (canUseLocalSeqMeta ? localSeqMeta.blocks : undefined) || gwBlocks || undefined;
+            // 若 Gateway 历史本身已带 thinking/toolCall 结构，优先使用 Gateway，避免与本地/服务端聚合 meta 错配后重复渲染。
+            // 若 Gateway 历史缺失结构化信息，再回退到服务端/本地持久化数据。
+            if (hasGatewayStructuredMeta) {
+              toolCalls = gwToolCalls || sMeta?.toolCalls || localTc || (canUseLocalSeqMeta ? localSeqMeta.toolCalls : undefined) || undefined;
+              thinking = gwThinking || tagThinking || sMeta?.thinking || localThk || (canUseLocalSeqMeta ? localSeqMeta.thinking : undefined) || undefined;
+              blocks = gwBlocks || sMeta?.blocks || localBlk || (canUseLocalSeqMeta ? localSeqMeta.blocks : undefined) || undefined;
+            } else {
+              toolCalls = sMeta?.toolCalls || localTc || gwToolCalls || (canUseLocalSeqMeta ? localSeqMeta.toolCalls : undefined) || undefined;
+              thinking = sMeta?.thinking || localThk || gwThinking || tagThinking || (canUseLocalSeqMeta ? localSeqMeta.thinking : undefined) || undefined;
+              blocks = sMeta?.blocks || localBlk || (canUseLocalSeqMeta ? localSeqMeta.blocks : undefined) || gwBlocks || undefined;
+            }
 
             // ⑤ 兜底：当有 toolCalls 或 thinking 但无 blocks 时，构建合理的 blocks 顺序
             // 确保使用交错渲染模式（而非传统模式将所有工具调用堆在顶部）
@@ -1950,13 +2036,15 @@ export const useChatStore = create<ChatState>((set, get) => {
             continue;
           }
 
-          const finalMsgId = (msg.id as string) || uuid();
+          const rawMsgId = msg.id as string | undefined;
+          const finalMsgId = rawMsgId || uuid();
 
           if (role === 'assistant' && (toolCalls?.length || blocks?.length)) {
             console.debug(`[store] loadHistory: msg ${finalMsgId} recovered tc=${toolCalls?.length || 0} blk=${blocks?.length || 0}`);
-            // 回写服务端元数据（确保下次也能恢复）
-            if (finalMsgId && !serverMetaById.has(finalMsgId)) {
-              apiClient.saveMessageMeta(sessionKey, finalMsgId, { toolCalls, thinking, blocks }).catch(() => {});
+            // 仅对带稳定 Gateway message.id 的消息回写服务端元数据，
+            // 避免为历史消息反复生成随机 ID，导致后续文本匹配错配。
+            if (rawMsgId && !serverMetaById.has(rawMsgId)) {
+              apiClient.saveMessageMeta(sessionKey, rawMsgId, { toolCalls, thinking, blocks }).catch(() => {});
             }
           }
 
@@ -1965,22 +2053,55 @@ export const useChatStore = create<ChatState>((set, get) => {
             sessionKey,
             role: role === 'assistant' ? 'assistant' : 'user',
             content: text,
-            thinking,
+            thinking: role === 'assistant' ? undefined : thinking,
             attachments: attachments.length > 0 ? attachments : undefined,
             toolCalls,
-            blocks,
+            blocks: role === 'assistant' ? stripThinkingBlocks(blocks) : blocks,
             createdAt: msg.timestamp || Date.now(),
           });
         }
 
-        set({ messages });
+        const liveState = get();
+        if (
+          liveState.currentSessionKey === sessionKey
+          && liveState.isStreaming
+          && (liveState.currentAiText || liveState.currentAiThinking || liveState.toolCards.size > 0)
+        ) {
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg?.role === 'assistant') {
+            const liveText = liveState.currentAiText.trim();
+            const historyText = lastMsg.content.trim();
+            const liveThinking = liveState.currentAiThinking.trim();
+            const historyThinking = (lastMsg.thinking || '').trim();
+            const liveToolNames = new Set(Array.from(liveState.toolCards.values()).map((tc) => tc.name));
+            const sharedTool = (lastMsg.toolCalls || []).some((tc) => liveToolNames.has(tc.name));
+            const textOverlap = !!(liveText && historyText && (liveText.startsWith(historyText) || historyText.startsWith(liveText)));
+            const thinkingOverlap = !!(
+              liveThinking
+              && historyThinking
+              && (liveThinking.startsWith(historyThinking) || historyThinking.startsWith(liveThinking))
+            );
+
+            if (textOverlap || thinkingOverlap || sharedTool) {
+              messages.pop();
+            }
+          }
+        }
+
+        if (requestSerial !== historyRequestSerial || viewVersion !== sessionViewVersion || get().currentSessionKey !== sessionKey) {
+          return;
+        }
+        set({ messages: messages.map(hideThinkingForDisplay) });
       } catch (e) {
         console.error('[store] loadHistory error:', e);
         // 出错时回退到本地 DB
         try {
           const localMessages = await db.getMessages(state.currentSessionKey || '');
+          if (requestSerial !== historyRequestSerial || viewVersion !== sessionViewVersion || get().currentSessionKey !== sessionKey) {
+            return;
+          }
           if (localMessages.length > 0) {
-            set({ messages: localMessages });
+            set({ messages: localMessages.map(hideThinkingForDisplay) });
           }
         } catch (_) { /* ignore */ }
       }

@@ -5,7 +5,7 @@
  * 架构：手机 ←SSE+POST→ 代理服务端 ←WS→ OpenClaw Gateway
  */
 
-import type { ConnectionStatus, GatewayMessage } from '../types';
+import type { ConnectionStatus, GatewayMessage, MessageBlock, ToolCall } from '../types';
 
 const REQUEST_TIMEOUT = 30000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -95,6 +95,10 @@ export class ApiClient {
   }
   get sid(): string | null {
     return this._sid;
+  }
+
+  get baseUrl(): string {
+    return this._baseUrl;
   }
 
   onStatusChange(fn: StatusChangeHandler): void {
@@ -541,7 +545,7 @@ export class ApiClient {
   async saveMessageMeta(
     sessionKey: string,
     messageId: string,
-    meta: { toolCalls?: unknown[]; thinking?: string; blocks?: unknown[] }
+    meta: { toolCalls?: ToolCall[]; thinking?: string; blocks?: MessageBlock[] }
   ): Promise<void> {
     if (!this._sid || !this._baseUrl) return;
     try {
@@ -565,9 +569,9 @@ export class ApiClient {
   /** 从服务端获取会话的所有助手元数据 */
   async getSessionMeta(sessionKey: string): Promise<Array<{
     messageId: string;
-    toolCalls?: unknown[];
+    toolCalls?: ToolCall[];
     thinking?: string;
-    blocks?: unknown[];
+    blocks?: MessageBlock[];
   }>> {
     if (!this._sid || !this._baseUrl) return [];
     try {
@@ -580,6 +584,40 @@ export class ApiClient {
       console.warn('[api] getSessionMeta error:', e);
       return [];
     }
+  }
+
+  async downloadGeneratedFile(path: string): Promise<{ blob: Blob; fileName: string }> {
+    if (!this._baseUrl || !this._token) throw new Error('未连接');
+
+    const res = await fetch(`${this._baseUrl}/api/download-file`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${this._token}`,
+      },
+      body: JSON.stringify({ path }),
+    });
+
+    if (!res.ok) {
+      let message = '下载失败';
+      try {
+        const data = await res.json();
+        message = data?.error || message;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(message);
+    }
+
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') || '';
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const fallbackMatch = disposition.match(/filename="?([^"]+)"?/i);
+    const fileName = utf8Match
+      ? decodeURIComponent(utf8Match[1])
+      : (fallbackMatch?.[1] || path.split(/[\\/]/).pop() || 'download.bin');
+
+    return { blob, fileName };
   }
 
   // ==================== 内部辅助 ====================
