@@ -4,7 +4,7 @@ import os from 'os'
 import path from 'path'
 
 export const PLUGIN_ID = 'clawchatfiles'
-export const PACKAGE_NAME = '@clawchat/clawchatfiles'
+export const PACKAGE_NAME = '@claw_chat/clawchatfiles'
 export const DEFAULT_SESSION_FILES_ROOT = path.join(
   os.homedir(),
   '.openclaw',

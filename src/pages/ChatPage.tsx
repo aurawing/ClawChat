@@ -337,6 +337,29 @@ function inferDownloadFileName(path: string, options?: { archive?: boolean }): s
     : sanitized;
 }
 
+function appendDownloadSuffix(fileName: string, index: number): string {
+  if (index <= 0) return fileName;
+  const dotIndex = fileName.lastIndexOf('.');
+  if (dotIndex <= 0) return `${fileName}(${index})`;
+  return `${fileName.slice(0, dotIndex)}(${index})${fileName.slice(dotIndex)}`;
+}
+
+async function resolveAvailableDownloadName(fileName: string): Promise<string> {
+  for (let index = 0; index < 1000; index += 1) {
+    const candidate = appendDownloadSuffix(fileName, index);
+    try {
+      await Filesystem.stat({
+        path: `${APP_DOWNLOAD_SUBDIR}/${candidate}`,
+        directory: Directory.Documents,
+      });
+    } catch {
+      return candidate;
+    }
+  }
+
+  throw new Error('下载文件重名过多，请手动清理旧文件后重试');
+}
+
 async function saveBlobWithPicker(blob: Blob, fileName: string): Promise<boolean> {
   const picker = (window as Window & {
     showSaveFilePicker?: (options?: Record<string, unknown>) => Promise<{
@@ -374,8 +397,9 @@ async function saveBlobToNativeDocuments(blob: Blob, fileName: string): Promise<
     // iOS / Web 或不需要权限时会直接继续
   }
 
+  const availableName = await resolveAvailableDownloadName(fileName);
   const base64 = await blobToBase64(blob);
-  const path = `${APP_DOWNLOAD_SUBDIR}/${fileName}`;
+  const path = `${APP_DOWNLOAD_SUBDIR}/${availableName}`;
   await Filesystem.writeFile({
     path,
     data: base64,
@@ -399,7 +423,8 @@ async function saveNativeDownloadedFile(downloadUrl: string, fileName: string): 
     /* ignore */
   }
 
-  const path = `${APP_DOWNLOAD_SUBDIR}/${fileName}`;
+  const availableName = await resolveAvailableDownloadName(fileName);
+  const path = `${APP_DOWNLOAD_SUBDIR}/${availableName}`;
   await Filesystem.downloadFile({
     url: downloadUrl,
     path,
@@ -749,9 +774,9 @@ export default function ChatPage() {
               className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
               title="历史详情"
             >
-              <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.9} d="M12 5.25a6.75 6.75 0 106.75 6.75A6.758 6.758 0 0012 5.25Z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.9} d="M12 8.75V12l2.4 1.5" />
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5.25a6.75 6.75 0 106.75 6.75A6.758 6.758 0 0012 5.25Z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8.75V12l2.4 1.5" />
               </svg>
             </button>
             <button
@@ -1094,7 +1119,7 @@ function HistoryDetailModal({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 bg-th-base">
+    <div className="fixed inset-0 z-50 bg-th-base flex flex-col safe-area-bottom">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-th-border-subtle bg-th-base/95 backdrop-blur-sm safe-area-top">
         <button
           onClick={onClose}
@@ -1111,10 +1136,7 @@ function HistoryDetailModal({
         </div>
       </div>
 
-      <div
-        className="overflow-y-auto px-4 py-4"
-        style={{ height: 'calc(100vh - env(safe-area-inset-top, 0px) - 57px)' }}
-      >
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {loading ? (
           <div className="text-sm text-th-text-muted">正在加载历史详情...</div>
         ) : error ? (
@@ -1153,7 +1175,7 @@ function FileBrowserModal({
   onDownload: (path: string, options?: { archive?: boolean }) => void | Promise<void>;
 }) {
   return (
-    <div className="fixed inset-0 z-50 bg-th-base">
+    <div className="fixed inset-0 z-50 bg-th-base flex flex-col safe-area-bottom">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-th-border-subtle bg-th-base/95 backdrop-blur-sm safe-area-top">
         <button
           onClick={onClose}
@@ -1186,13 +1208,7 @@ function FileBrowserModal({
         </div>
       </div>
 
-      <div
-        className="overflow-y-auto px-4 py-4"
-        style={{
-          height: 'calc(100vh - env(safe-area-inset-top, 0px) - 57px)',
-          paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
-        }}
-      >
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {loading ? (
           <div className="text-sm text-th-text-muted">正在加载文件...</div>
         ) : error ? (

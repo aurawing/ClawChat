@@ -1,6 +1,6 @@
 {
   "name": "clawchat-proxy",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "description": "ClawChat SSE+POST 代理服务端 - 兼容 ClawApp 协议",
   "type": "module",
   "main": "index.js",
