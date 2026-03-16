@@ -1,0 +1,36 @@
+{
+  "id": "clawchatfiles",
+  "name": "ClawChat Session Files",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "sessionKeyFilter": {
+        "type": "string",
+        "description": "Only apply the plugin to session keys matching this filter."
+      },
+      "sessionKeyMatchMode": {
+        "type": "string",
+        "enum": ["prefix", "includes", "regex"],
+        "description": "How sessionKeyFilter should be matched."
+      },
+      "sessionFilesRoot": {
+        "type": "string",
+        "description": "Absolute path to the session files root visible to the OpenClaw runtime."
+      },
+      "dirNameStrategy": {
+        "type": "string",
+        "enum": ["hash", "raw", "urlencoded"],
+        "description": "How the per-session directory name should be derived."
+      },
+      "hashLength": {
+        "type": "integer",
+        "minimum": 8,
+        "description": "Hash length when dirNameStrategy is set to hash."
+      }
+    }
+  },
+  "runtime": {
+    "entry": "./index.js"
+  }
+}

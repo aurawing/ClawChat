@@ -1,0 +1,26 @@
+{
+  "name": "@clawchat/openclaw-plugin-clawchatfiles",
+  "version": "0.1.0",
+  "description": "ClawChat session-scoped file policy plugin for OpenClaw",
+  "type": "module",
+  "main": "./index.js",
+  "files": [
+    "index.js",
+    "setup.js",
+    "shared.js",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "clawchat"
+  ],
+  "license": "MIT",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "setupEntry": "./setup.js"
+  }
+}

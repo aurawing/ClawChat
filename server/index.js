@@ -76,9 +76,6 @@ if (!existsSync(ENV_PATH)) {
     '# 例如: DOWNLOAD_PATH_MAPS=/root/.openclaw/workspace=>../workspace',
     'DOWNLOAD_PATH_MAPS=',
     '',
-    '# APP 文件浏览页固定根目录（相对 server/ 或绝对路径）',
-    'FILE_BROWSER_ROOT=../workspace',
-    '',
     '# 日志级别: error / warn / info / debug / trace',
     '# trace 级别会打印与 Gateway 交互的所有完整 JSON 帧',
     'LOG_LEVEL=info',
@@ -104,9 +101,9 @@ const CONFIG = {
     .filter(Boolean)
     .map((p) => resolve(__dirname, p)),
   downloadPathMaps: parseDownloadPathMaps(process.env.DOWNLOAD_PATH_MAPS),
-  fileBrowserRoot: process.env.FILE_BROWSER_ROOT ? resolve(__dirname, process.env.FILE_BROWSER_ROOT) : null,
   distPath: join(__dirname, '..', 'dist'),
 };
+const CLAWCHAT_FILES_RPC_PREFIX = 'clawchatfiles';
 
 // ==================== 多用户配置 ====================
 // 格式: PROXY_USERS=alice:tokenA,bob:tokenB
@@ -449,39 +446,29 @@ function resolveDownloadableFilePath(rawPath) {
   return null;
 }
 
-function getFileBrowserRoot() {
-  if (!CONFIG.fileBrowserRoot) return null;
-  if (!existsSync(CONFIG.fileBrowserRoot)) return null;
-  try {
-    if (!statSync(CONFIG.fileBrowserRoot).isDirectory()) return null;
-  } catch {
-    return null;
+function resolvePluginFilePath(rawPath) {
+  if (!rawPath || typeof rawPath !== 'string') return null;
+  const translated = translateDownloadPath(rawPath);
+  const candidates = [translated, resolve(rawPath)].filter(Boolean);
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const stat = statSync(candidate);
+      if (!stat.isFile()) continue;
+      return {
+        absolutePath: candidate,
+        fileName: basename(candidate),
+        stat,
+      };
+    } catch {
+      continue;
+    }
   }
-  return CONFIG.fileBrowserRoot;
+  return null;
 }
 
-function normalizeBrowserRelativePath(rawPath) {
-  return String(rawPath || '')
-    .replace(/\\/g, '/')
-    .replace(/^\/+/, '')
-    .replace(/\/+/g, '/')
-    .trim();
-}
-
-function resolveBrowserPath(rawPath = '') {
-  const root = getFileBrowserRoot();
-  if (!root) return null;
-
-  const relativePath = normalizeBrowserRelativePath(rawPath);
-  const absolutePath = resolve(root, relativePath || '.');
-  if (!isPathWithinRoot(absolutePath, root) || !existsSync(absolutePath)) return null;
-
-  try {
-    const stat = statSync(absolutePath);
-    return { root, relativePath, absolutePath, stat };
-  } catch {
-    return null;
-  }
+async function callClawChatFilesRPC(sid, action, params) {
+  return sendGatewayRPC(sid, `${CLAWCHAT_FILES_RPC_PREFIX}.${action}`, params);
 }
 
 // ==================== 会话管理 ====================
@@ -1195,69 +1182,81 @@ app.post('/api/disconnect', (req, res) => {
   res.json({ ok: true });
 });
 
-/** GET /api/files — 浏览固定根目录下的文件和子目录 */
-app.get('/api/files', (req, res) => {
+/** GET /api/files — 浏览当前会话对应目录下的文件和子目录（通过 clawchatfiles 插件） */
+app.get('/api/files', async (req, res) => {
   const sid = String(req.query.sid || '');
   const session = sessions.get(sid);
   if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+  const sessionKey = String(req.query.sessionKey || '');
+  if (!sessionKey) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
 
-  const resolved = resolveBrowserPath(String(req.query.path || ''));
-  if (!resolved) {
-    return res.status(400).json({ ok: false, error: '文件浏览根目录未配置或路径无效' });
-  }
-  if (!resolved.stat.isDirectory()) {
-    return res.status(400).json({ ok: false, error: '当前路径不是目录' });
-  }
-
-  const entries = readdirSync(resolved.absolutePath, { withFileTypes: true })
-    .map((dirent) => {
-      const fullPath = join(resolved.absolutePath, dirent.name);
-      const stat = statSync(fullPath);
-      const childRelativePath = normalizeBrowserRelativePath(join(resolved.relativePath, dirent.name));
-      return {
-        name: dirent.name,
-        path: childRelativePath,
-        isDirectory: dirent.isDirectory(),
-        size: dirent.isDirectory() ? 0 : stat.size,
-        modifiedAt: stat.mtimeMs || stat.mtime.getTime(),
-      };
-    })
-    .sort((a, b) => {
-      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-      return a.name.localeCompare(b.name, 'zh-CN');
+  try {
+    const result = await callClawChatFilesRPC(sid, 'list', {
+      sessionKey,
+      path: String(req.query.path || ''),
     });
-
-  const parentPath = resolved.relativePath
-    ? resolved.relativePath.split('/').slice(0, -1).join('/') || ''
-    : null;
-
-  res.json({
-    ok: true,
-    rootName: basename(resolved.root),
-    currentPath: resolved.relativePath,
-    parentPath,
-    entries,
-  });
+    res.json({
+      ok: true,
+      rootName: '当前对话文件',
+      sessionDirId: result?.sessionDirId || '',
+      currentPath: result?.currentPath || '',
+      parentPath: result?.parentPath ?? null,
+      entries: Array.isArray(result?.entries) ? result.entries : [],
+    });
+  } catch (e) {
+    const message = (e && e.message) || '';
+    if (/does not match plugin filter/i.test(message)) {
+      return res.status(400).json({ ok: false, error: '当前会话未启用 ClawChat 文件插件' });
+    }
+    if (/Requested path is not a directory/i.test(message)) {
+      return res.status(400).json({ ok: false, error: '当前路径不是目录' });
+    }
+    res.status(500).json({ ok: false, error: message || '加载文件列表失败' });
+  }
 });
 
-/** POST /api/files/download — 下载固定根目录下的文件 */
-app.post('/api/files/download', (req, res) => {
-  const { sid, path: rawPath } = req.body || {};
+/** POST /api/files/download — 下载当前会话目录下的文件（通过 clawchatfiles 插件解析） */
+app.post('/api/files/download', async (req, res) => {
+  const { sid, sessionKey, path: rawPath } = req.body || {};
   const session = sessions.get(String(sid || ''));
   if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+  if (!sessionKey) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
 
-  const resolved = resolveBrowserPath(String(rawPath || ''));
-  if (!resolved) {
-    return res.status(400).json({ ok: false, error: '路径无效' });
-  }
-  if (!resolved.stat.isFile()) {
-    return res.status(400).json({ ok: false, error: '只能下载文件' });
-  }
+  try {
+    const result = await callClawChatFilesRPC(String(sid || ''), 'resolve', {
+      sessionKey: String(sessionKey),
+      path: String(rawPath || ''),
+    });
 
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(basename(resolved.absolutePath))}`);
-  res.setHeader('Cache-Control', 'no-store');
-  res.sendFile(resolved.absolutePath);
+    if (!result?.exists) {
+      return res.status(404).json({ ok: false, error: '文件不存在' });
+    }
+    if (!result?.isFile) {
+      return res.status(400).json({ ok: false, error: '只能下载文件' });
+    }
+
+    const localFile = resolvePluginFilePath(result.absolutePath);
+    if (!localFile) {
+      return res.status(500).json({
+        ok: false,
+        error: '插件返回的文件路径在代理侧不可访问，请检查 OpenClaw 与代理的目录映射配置',
+      });
+    }
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.name || localFile.fileName)}`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(localFile.absolutePath);
+  } catch (e) {
+    const message = (e && e.message) || '';
+    if (/does not match plugin filter/i.test(message)) {
+      return res.status(400).json({ ok: false, error: '当前会话未启用 ClawChat 文件插件' });
+    }
+    if (/escapes session directory/i.test(message)) {
+      return res.status(400).json({ ok: false, error: '路径无效' });
+    }
+    res.status(500).json({ ok: false, error: message || '下载失败' });
+  }
 });
 
 /** GET /api/progress */

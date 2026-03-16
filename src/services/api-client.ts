@@ -620,16 +620,17 @@ export class ApiClient {
     return { blob, fileName };
   }
 
-  async listFiles(path = ''): Promise<{
+  async listFiles(sessionKey: string, path = ''): Promise<{
     rootName: string;
     currentPath: string;
     parentPath: string | null;
     entries: FileBrowserEntry[];
   }> {
     if (!this._baseUrl || !this._sid) throw new Error('未连接');
+    if (!sessionKey) throw new Error('缺少 sessionKey');
 
     const res = await fetch(
-      `${this._baseUrl}/api/files?sid=${encodeURIComponent(this._sid)}&path=${encodeURIComponent(path)}`
+      `${this._baseUrl}/api/files?sid=${encodeURIComponent(this._sid)}&sessionKey=${encodeURIComponent(sessionKey)}&path=${encodeURIComponent(path)}`
     );
     const data = await res.json();
     if (!res.ok || !data?.ok) throw new Error(data?.error || '加载文件列表失败');
@@ -641,13 +642,14 @@ export class ApiClient {
     };
   }
 
-  async downloadBrowserFile(path: string): Promise<{ blob: Blob; fileName: string }> {
+  async downloadBrowserFile(sessionKey: string, path: string): Promise<{ blob: Blob; fileName: string }> {
     if (!this._baseUrl || !this._sid) throw new Error('未连接');
+    if (!sessionKey) throw new Error('缺少 sessionKey');
 
     const res = await fetch(`${this._baseUrl}/api/files/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sid: this._sid, path }),
+      body: JSON.stringify({ sid: this._sid, sessionKey, path }),
     });
 
     if (!res.ok) {

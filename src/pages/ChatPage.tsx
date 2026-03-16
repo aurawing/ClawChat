@@ -524,13 +524,13 @@ export default function ChatPage() {
   }, [showHistoryDetail, currentSessionKey]);
 
   useEffect(() => {
-    if (!showFileBrowser || !apiClient.gatewayReady) return;
+    if (!showFileBrowser || !apiClient.gatewayReady || !currentSessionKey) return;
     let cancelled = false;
 
     setFileBrowserLoading(true);
     setFileBrowserError(null);
 
-    apiClient.listFiles(fileBrowserPath)
+    apiClient.listFiles(currentSessionKey, fileBrowserPath)
       .then((result) => {
         if (cancelled) return;
         setFileBrowserRootName(result.rootName);
@@ -548,7 +548,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [showFileBrowser, fileBrowserPath]);
+  }, [showFileBrowser, fileBrowserPath, currentSessionKey]);
 
   const handleSend = useCallback(
     (content: string, attachments?: FileAttachment[]) => {
@@ -743,6 +743,10 @@ export default function ChatPage() {
             </button>
             <button
               onClick={() => {
+                if (!currentSessionKey) {
+                  alert('当前没有可用会话');
+                  return;
+                }
                 setFileBrowserPath('');
                 setShowFileBrowser(true);
               }}
@@ -824,7 +828,8 @@ export default function ChatPage() {
           onDownload={async (path) => {
             try {
               setDownloadingBrowserPath(path);
-              const { blob, fileName } = await apiClient.downloadBrowserFile(path);
+              if (!currentSessionKey) throw new Error('当前没有可用会话');
+              const { blob, fileName } = await apiClient.downloadBrowserFile(currentSessionKey, path);
               const savedLocation = await saveDownloadedFile(blob, fileName);
               if (savedLocation) {
                 alert(`已保存到 Documents/${APP_DOWNLOAD_SUBDIR}\n\n${savedLocation}`);
