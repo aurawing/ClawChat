@@ -1,5 +1,5 @@
 {
-  "name": "@clawchat/openclaw-plugin-clawchatfiles",
+  "name": "@clawchat/clawchatfiles",
   "version": "0.1.0",
   "description": "ClawChat session-scoped file policy plugin for OpenClaw",
   "type": "module",

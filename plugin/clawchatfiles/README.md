@@ -28,7 +28,7 @@ plugin/
 ```bash
 cd plugin/clawchatfiles
 npm pack
-openclaw plugins install ./clawchat-openclaw-plugin-clawchatfiles-0.1.0.tgz
+openclaw plugins install ./clawchat-clawchatfiles-0.1.0.tgz
 ```
 
 也可以直接尝试本地目录安装：
@@ -56,7 +56,7 @@ openclaw plugins install ./plugin/clawchatfiles
 ```bash
 cd plugin/clawchatfiles
 npm pack
-openclaw plugins install ./clawchat-openclaw-plugin-clawchatfiles-0.1.0.tgz
+openclaw plugins install ./clawchat-clawchatfiles-0.1.0.tgz
 openclaw plugins list
 openclaw setup
 ```

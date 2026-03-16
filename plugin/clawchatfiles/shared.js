@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import path from 'path'
 
 export const PLUGIN_ID = 'clawchatfiles'
-export const PACKAGE_NAME = '@clawchat/openclaw-plugin-clawchatfiles'
+export const PACKAGE_NAME = '@clawchat/clawchatfiles'
 export const DEFAULTS = {
   sessionKeyFilter: 'clawchat-',
   sessionKeyMatchMode: 'includes',
