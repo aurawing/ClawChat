@@ -88,7 +88,7 @@ openclaw setup
         config: {
           sessionKeyFilter: "clawchat-",
           sessionKeyMatchMode: "includes",
-          sessionFilesRoot: "/root/.openclaw/workspace/sessions",
+          sessionFilesRoot: "~/.openclaw/workspace/sessions",
           dirNameStrategy: "hash",
           hashLength: 24,
         },
@@ -105,7 +105,7 @@ openclaw setup
 - `sessionKeyMatchMode`
   - 支持 `prefix` / `includes` / `regex`
 - `sessionFilesRoot`
-  - 会话文件根目录，建议填写 OpenClaw 运行环境可见的绝对路径
+  - 会话文件根目录；未配置时默认按当前运行用户推导为 `~/.openclaw/workspace/sessions`
 - `dirNameStrategy`
   - 支持 `hash` / `raw` / `urlencoded`
 - `hashLength`
@@ -152,7 +152,7 @@ openclaw setup
         config: {
           sessionKeyFilter: "clawchat-",
           sessionKeyMatchMode: "includes",
-          sessionFilesRoot: "/root/.openclaw/workspace/sessions",
+          sessionFilesRoot: "~/.openclaw/workspace/sessions",
           dirNameStrategy: "hash",
           hashLength: 24,
         },
@@ -188,10 +188,10 @@ openclaw setup
   - 向插件调用 `clawchatfiles.resolve`
   - 再由代理服务负责实际文件流下载
 
-如果 OpenClaw 运行环境与代理服务不在同一文件系统中，需要在代理的 `server/.env` 中配置：
+如果 OpenClaw 运行环境与代理服务不在同一文件系统中，需要在代理的 `server/.env` 中配置对应的 home 路径映射，例如：
 
 ```env
-DOWNLOAD_PATH_MAPS=/root/.openclaw/workspace=>../workspace
+DOWNLOAD_PATH_MAPS=/home/<user>/.openclaw/workspace=>../workspace
 ```
 
 用于把插件返回的 OpenClaw 侧路径映射到代理本地可访问路径。

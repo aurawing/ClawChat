@@ -1,13 +1,20 @@
 import { createHash } from 'crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
+import os from 'os'
 import path from 'path'
 
 export const PLUGIN_ID = 'clawchatfiles'
 export const PACKAGE_NAME = '@clawchat/clawchatfiles'
+export const DEFAULT_SESSION_FILES_ROOT = path.join(
+  os.homedir(),
+  '.openclaw',
+  'workspace',
+  'sessions'
+)
 export const DEFAULTS = {
   sessionKeyFilter: 'clawchat-',
   sessionKeyMatchMode: 'includes',
-  sessionFilesRoot: '/root/.openclaw/workspace/sessions',
+  sessionFilesRoot: DEFAULT_SESSION_FILES_ROOT,
   dirNameStrategy: 'hash',
   hashLength: 24,
 }
