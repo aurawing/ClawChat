@@ -680,6 +680,21 @@ export class ApiClient {
     return { blob, fileName };
   }
 
+  buildBrowserDownloadUrl(sessionKey: string, path: string, options?: { archive?: boolean }): string {
+    if (!this._baseUrl || !this._sid) throw new Error('未连接');
+    if (!sessionKey) throw new Error('缺少 sessionKey');
+
+    const query = new URLSearchParams({
+      sid: this._sid,
+      sessionKey,
+      path,
+    });
+    if (options?.archive) {
+      query.set('archive', '1');
+    }
+    return `${this._baseUrl}/api/files/download?${query.toString()}`;
+  }
+
   // ==================== 内部辅助 ====================
 
   private _notifyReadyError(msg: string): void {

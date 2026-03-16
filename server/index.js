@@ -475,6 +475,86 @@ function buildArchiveName(name) {
   return base.toLowerCase().endsWith('.zip') ? base : `${base}.zip`;
 }
 
+async function handleSessionFileDownload({ sid, sessionKey, rawPath, archive }, res) {
+  const session = sessions.get(String(sid || ''));
+  if (!session) {
+    res.status(404).json({ ok: false, error: '会话不存在' });
+    return;
+  }
+  if (!sessionKey) {
+    res.status(400).json({ ok: false, error: '缺少 sessionKey' });
+    return;
+  }
+
+  try {
+    const result = await callClawChatFilesRPC(String(sid || ''), 'resolve', {
+      sessionKey: String(sessionKey),
+      path: String(rawPath || ''),
+    });
+
+    if (!result?.exists) {
+      res.status(404).json({ ok: false, error: '文件不存在' });
+      return;
+    }
+
+    const localTarget = resolvePluginFilePath(result.absolutePath);
+    if (!localTarget) {
+      res.status(500).json({
+        ok: false,
+        error: '插件返回的文件路径在代理侧不可访问，请检查 OpenClaw 与代理的目录映射配置',
+      });
+      return;
+    }
+
+    if (archive) {
+      if (!localTarget.stat.isDirectory()) {
+        res.status(400).json({ ok: false, error: '只能打包下载目录' });
+        return;
+      }
+
+      const archiveName = buildArchiveName(result.name || localTarget.fileName || 'archive');
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(archiveName)}`);
+      res.setHeader('Cache-Control', 'no-store');
+
+      const zip = archiver('zip', { zlib: { level: 9 } });
+      zip.on('error', (err) => {
+        log.warn('目录打包下载失败:', err?.message || err);
+        if (!res.headersSent) {
+          res.status(500).json({ ok: false, error: '目录打包失败' });
+          return;
+        }
+        res.destroy(err);
+      });
+      zip.pipe(res);
+      zip.directory(localTarget.absolutePath, result.name || localTarget.fileName);
+      await zip.finalize();
+      return;
+    }
+
+    if (!localTarget.stat.isFile()) {
+      res.status(400).json({ ok: false, error: '只能下载文件' });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.name || localTarget.fileName)}`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.sendFile(localTarget.absolutePath);
+  } catch (e) {
+    const message = (e && e.message) || '';
+    if (/does not match plugin filter/i.test(message)) {
+      res.status(400).json({ ok: false, error: '当前会话未启用 ClawChat 文件插件' });
+      return;
+    }
+    if (/escapes session directory/i.test(message)) {
+      res.status(400).json({ ok: false, error: '路径无效' });
+      return;
+    }
+    res.status(500).json({ ok: false, error: message || '下载失败' });
+  }
+}
+
 async function callClawChatFilesRPC(sid, action, params) {
   return sendGatewayRPC(sid, `${CLAWCHAT_FILES_RPC_PREFIX}.${action}`, params);
 }
@@ -1226,71 +1306,17 @@ app.get('/api/files', async (req, res) => {
 /** POST /api/files/download — 下载当前会话目录下的文件（通过 clawchatfiles 插件解析） */
 app.post('/api/files/download', async (req, res) => {
   const { sid, sessionKey, path: rawPath, archive } = req.body || {};
-  const session = sessions.get(String(sid || ''));
-  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
-  if (!sessionKey) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
+  await handleSessionFileDownload({ sid, sessionKey, rawPath, archive: !!archive }, res);
+});
 
-  try {
-    const result = await callClawChatFilesRPC(String(sid || ''), 'resolve', {
-      sessionKey: String(sessionKey),
-      path: String(rawPath || ''),
-    });
-
-    if (!result?.exists) {
-      return res.status(404).json({ ok: false, error: '文件不存在' });
-    }
-
-    const localTarget = resolvePluginFilePath(result.absolutePath);
-    if (!localTarget) {
-      return res.status(500).json({
-        ok: false,
-        error: '插件返回的文件路径在代理侧不可访问，请检查 OpenClaw 与代理的目录映射配置',
-      });
-    }
-
-    if (archive) {
-      if (!localTarget.stat.isDirectory()) {
-        return res.status(400).json({ ok: false, error: '只能打包下载目录' });
-      }
-
-      const archiveName = buildArchiveName(result.name || localTarget.fileName || 'archive');
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(archiveName)}`);
-      res.setHeader('Cache-Control', 'no-store');
-
-      const zip = archiver('zip', { zlib: { level: 9 } });
-      zip.on('error', (err) => {
-        log.warn('目录打包下载失败:', err?.message || err);
-        if (!res.headersSent) {
-          res.status(500).json({ ok: false, error: '目录打包失败' });
-          return;
-        }
-        res.destroy(err);
-      });
-      zip.pipe(res);
-      zip.directory(localTarget.absolutePath, result.name || localTarget.fileName);
-      await zip.finalize();
-      return;
-    }
-
-    if (!localTarget.stat.isFile()) {
-      return res.status(400).json({ ok: false, error: '只能下载文件' });
-    }
-
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.name || localTarget.fileName)}`);
-    res.setHeader('Cache-Control', 'no-store');
-    res.sendFile(localTarget.absolutePath);
-  } catch (e) {
-    const message = (e && e.message) || '';
-    if (/does not match plugin filter/i.test(message)) {
-      return res.status(400).json({ ok: false, error: '当前会话未启用 ClawChat 文件插件' });
-    }
-    if (/escapes session directory/i.test(message)) {
-      return res.status(400).json({ ok: false, error: '路径无效' });
-    }
-    res.status(500).json({ ok: false, error: message || '下载失败' });
-  }
+/** GET /api/files/download — 原生端直连下载，避免 WebView 二进制转码损坏 */
+app.get('/api/files/download', async (req, res) => {
+  await handleSessionFileDownload({
+    sid: String(req.query.sid || ''),
+    sessionKey: String(req.query.sessionKey || ''),
+    rawPath: String(req.query.path || ''),
+    archive: String(req.query.archive || '') === '1' || String(req.query.archive || '').toLowerCase() === 'true',
+  }, res);
 });
 
 /** GET /api/progress */

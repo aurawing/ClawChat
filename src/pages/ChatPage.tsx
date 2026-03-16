@@ -307,25 +307,34 @@ function parseHistoryDetailMessages(history: ChatMessage[]): Message[] {
   return messages;
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return btoa(binary);
+}
+
 async function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const result = reader.result;
-      if (typeof result !== 'string') {
-        reject(new Error('文件转换失败'));
-        return;
-      }
-      const base64 = result.split(',')[1];
-      if (!base64) {
-        reject(new Error('文件转换失败'));
-        return;
-      }
-      resolve(base64);
-    };
-    reader.onerror = () => reject(reader.error || new Error('文件转换失败'));
-    reader.readAsDataURL(blob);
-  });
+  try {
+    const buffer = await blob.arrayBuffer();
+    return arrayBufferToBase64(buffer);
+  } catch {
+    throw new Error('文件转换失败');
+  }
+}
+
+function inferDownloadFileName(path: string, options?: { archive?: boolean }): string {
+  const segment = path.split(/[\\/]/).filter(Boolean).pop() || 'current-session-files';
+  const sanitized = segment.replace(/[\\/:*?"<>|]/g, '_');
+  return options?.archive
+    ? (sanitized.toLowerCase().endsWith('.zip') ? sanitized : `${sanitized}.zip`)
+    : sanitized;
 }
 
 async function saveBlobWithPicker(blob: Blob, fileName: string): Promise<boolean> {
@@ -352,7 +361,7 @@ async function fallbackBrowserDownload(blob: Blob, fileName: string): Promise<vo
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
 async function saveBlobToNativeDocuments(blob: Blob, fileName: string): Promise<string> {
@@ -370,6 +379,30 @@ async function saveBlobToNativeDocuments(blob: Blob, fileName: string): Promise<
   await Filesystem.writeFile({
     path,
     data: base64,
+    directory: Directory.Documents,
+    recursive: true,
+  });
+  const { uri } = await Filesystem.getUri({
+    path,
+    directory: Directory.Documents,
+  });
+  return uri || path;
+}
+
+async function saveNativeDownloadedFile(downloadUrl: string, fileName: string): Promise<string> {
+  try {
+    const perms = await Filesystem.checkPermissions();
+    if (perms.publicStorage !== 'granted') {
+      await Filesystem.requestPermissions();
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const path = `${APP_DOWNLOAD_SUBDIR}/${fileName}`;
+  await Filesystem.downloadFile({
+    url: downloadUrl,
+    path,
     directory: Directory.Documents,
     recursive: true,
   });
@@ -655,6 +688,8 @@ export default function ChatPage() {
           onClose={() => setShowSidebar(false)}
           onDisconnect={disconnect}
           onOpenSettings={() => setShowSettings(true)}
+          theme={theme}
+          onToggleTheme={toggleTheme}
         />
       </div>
 
@@ -709,29 +744,14 @@ export default function ChatPage() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
               </svg>
             </button>
-            {/* 主题切换 */}
-            <button
-              onClick={toggleTheme}
-              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
-              title={theme === 'dark' ? '切换为浅色' : '切换为深色'}
-            >
-              {theme === 'dark' ? (
-                <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-                </svg>
-              ) : (
-                <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                </svg>
-              )}
-            </button>
             <button
               onClick={() => setShowHistoryDetail(true)}
               className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
               title="历史详情"
             >
               <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17h6M9 13h6M9 9h6M5 5h14a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.9} d="M12 5.25a6.75 6.75 0 106.75 6.75A6.758 6.758 0 0012 5.25Z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.9} d="M12 8.75V12l2.4 1.5" />
               </svg>
             </button>
             <button
@@ -822,8 +842,16 @@ export default function ChatPage() {
             try {
               setDownloadingBrowserPath(path);
               if (!currentSessionKey) throw new Error('当前没有可用会话');
-              const { blob, fileName } = await apiClient.downloadBrowserFile(currentSessionKey, path, options);
-              const savedLocation = await saveDownloadedFile(blob, fileName);
+              const fileName = inferDownloadFileName(path, options);
+              const savedLocation = Capacitor.isNativePlatform()
+                ? await saveNativeDownloadedFile(
+                    apiClient.buildBrowserDownloadUrl(currentSessionKey, path, options),
+                    fileName
+                  )
+                : await (async () => {
+                    const { blob, fileName: serverFileName } = await apiClient.downloadBrowserFile(currentSessionKey, path, options);
+                    return saveDownloadedFile(blob, serverFileName);
+                  })();
               if (savedLocation) {
                 alert(`已保存到 Documents/${APP_DOWNLOAD_SUBDIR}\n\n${savedLocation}`);
               }
