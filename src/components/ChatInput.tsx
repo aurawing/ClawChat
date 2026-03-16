@@ -229,7 +229,8 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
           placeholder="输入消息..."
           disabled={disabled}
           rows={1}
-          className="flex-1 bg-th-input border border-th-border rounded-2xl px-4 py-2.5 text-sm text-th-text placeholder-th-text-dim resize-none outline-none focus:border-emerald-500/40 transition-colors max-h-[160px] disabled:opacity-50"
+          className="cc-hide-scrollbar flex-1 bg-th-input border border-th-border rounded-2xl px-4 py-2.5 text-sm text-th-text placeholder-th-text-dim resize-none outline-none focus:border-emerald-500/40 transition-colors max-h-[160px] overflow-y-auto disabled:opacity-50"
+          style={{ scrollbarWidth: 'none' }}
         />
 
         {/* 发送/停止按钮 */}

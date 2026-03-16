@@ -7,6 +7,8 @@ import MessageBubble from '../components/MessageBubble';
 import ChatInput from '../components/ChatInput';
 import SessionList from '../components/SessionList';
 import { useTheme } from '../hooks/useTheme';
+import { useLocale } from '../hooks/useLocale';
+import { getAppName } from '../i18n';
 import type { ChatMessage, ContentBlock, FileAttachment, FileBrowserEntry, Message, MessageBlock, ServerConfig, ToolCall } from '../types';
 
 const APP_DOWNLOAD_SUBDIR = 'ClawChat';
@@ -428,6 +430,7 @@ export default function ChatPage() {
   } = useChatStore();
 
   const { theme, toggleTheme } = useTheme();
+  const { appName } = useLocale();
   const [showSidebar, setShowSidebar] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistoryDetail, setShowHistoryDetail] = useState(false);
@@ -617,7 +620,7 @@ export default function ChatPage() {
   const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiThinking;
 
   const currentSession = sessions.find((s) => s.key === currentSessionKey);
-  const currentTitle = currentSession?.title || (currentSessionKey ? extractTitle(currentSessionKey) : 'ClawChat');
+  const currentTitle = currentSession?.title || (currentSessionKey ? extractTitle(currentSessionKey) : appName);
 
   return (
     <div className="h-screen flex bg-th-base">
@@ -651,6 +654,7 @@ export default function ChatPage() {
           onRefresh={loadSessions}
           onClose={() => setShowSidebar(false)}
           onDisconnect={disconnect}
+          onOpenSettings={() => setShowSettings(true)}
         />
       </div>
 
@@ -720,17 +724,6 @@ export default function ChatPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
                 </svg>
               )}
-            </button>
-            {/* 设置 */}
-            <button
-              onClick={() => setShowSettings(true)}
-              className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
-              title="连接设置"
-            >
-              <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
             </button>
             <button
               onClick={() => setShowHistoryDetail(true)}
@@ -825,11 +818,11 @@ export default function ChatPage() {
           downloadingPath={downloadingBrowserPath}
           onClose={() => setShowFileBrowser(false)}
           onNavigate={(path) => setFileBrowserPath(path)}
-          onDownload={async (path) => {
+          onDownload={async (path, options) => {
             try {
               setDownloadingBrowserPath(path);
               if (!currentSessionKey) throw new Error('当前没有可用会话');
-              const { blob, fileName } = await apiClient.downloadBrowserFile(currentSessionKey, path);
+              const { blob, fileName } = await apiClient.downloadBrowserFile(currentSessionKey, path, options);
               const savedLocation = await saveDownloadedFile(blob, fileName);
               if (savedLocation) {
                 alert(`已保存到 Documents/${APP_DOWNLOAD_SUBDIR}\n\n${savedLocation}`);
@@ -858,6 +851,7 @@ function SettingsModal({
   onSave: (config: ServerConfig) => void;
   onClose: () => void;
 }) {
+  const { localePreference, setLocalePreference, t, locale } = useLocale();
   const [host, setHost] = useState(currentConfig?.host || '');
   const [token, setToken] = useState(currentConfig?.token || '');
   const [username, setUsername] = useState(currentConfig?.username || '');
@@ -883,7 +877,7 @@ function SettingsModal({
       <div className="relative bg-th-surface border border-th-border rounded-2xl w-full max-w-sm shadow-2xl animate-fadeIn">
         {/* 标题 */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-th-border-subtle">
-          <h3 className="text-base font-semibold text-th-text">连接设置</h3>
+          <h3 className="text-base font-semibold text-th-text">{t('settingsTitle')}</h3>
           <button
             onClick={onClose}
             className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-th-elevated text-th-text-muted hover:text-th-text transition-colors"
@@ -897,15 +891,31 @@ function SettingsModal({
         {/* 表单 */}
         <div className="px-5 py-4 space-y-4">
           <div>
+            <label className="block text-sm text-th-text-muted mb-1.5">{t('languageLabel')}</label>
+            <select
+              value={localePreference}
+              onChange={(e) => setLocalePreference(e.target.value as 'system' | 'zh-CN' | 'en')}
+              className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm outline-none focus:border-emerald-500/50 transition-colors"
+            >
+              <option value="system">{t('followSystem')}</option>
+              <option value="zh-CN">{t('chinese')}</option>
+              <option value="en">{t('english')}</option>
+            </select>
+            <p className="text-xs text-th-text-faint mt-1">
+              {locale === 'zh-CN' ? '应用名称将显示为“虾聊”' : 'The app name will be shown as "ClawChat".'}
+            </p>
+          </div>
+
+          <div>
             <label className="block text-sm text-th-text-muted mb-1.5">服务器地址</label>
             <input
               type="text"
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              placeholder="192.168.1.100:3210"
+              placeholder="http://example.com:3210"
               className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
             />
-            <p className="text-xs text-th-text-faint mt-1">IP 自动 http，域名自动 https</p>
+            <p className="text-xs text-th-text-faint mt-1">请输入完整地址，包含 `http://` 或 `https://`</p>
           </div>
 
           <div>
@@ -992,7 +1002,7 @@ function extractTitle(key: string): string {
     if (agent !== 'main') label = `[${agent}] ${label}`;
     return label;
   }
-  return 'ClawChat';
+  return getAppName();
 }
 
 /** 中止后操作按钮 */
@@ -1030,11 +1040,12 @@ function ThinkingPlaceholder() {
       </div>
       <div className="bg-th-elevated/60 rounded-2xl rounded-tl-md px-4 py-3 min-w-[150px]">
         <div className="flex items-center gap-2 text-sm text-th-text-muted">
-          <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
           <span>正在思考</span>
         </div>
-        <div className="mt-2 h-1.5 w-24 rounded-full bg-th-border-subtle overflow-hidden">
-          <div className="h-full w-1/2 rounded-full bg-emerald-400/70 animate-pulse" />
+        <div className="mt-2 flex items-center gap-1.5">
+          <span className="cc-thinking-dot" style={{ animationDelay: '0ms' }} />
+          <span className="cc-thinking-dot" style={{ animationDelay: '140ms' }} />
+          <span className="cc-thinking-dot" style={{ animationDelay: '280ms' }} />
         </div>
       </div>
     </div>
@@ -1111,7 +1122,7 @@ function FileBrowserModal({
   downloadingPath: string | null;
   onClose: () => void;
   onNavigate: (path: string) => void;
-  onDownload: (path: string) => void | Promise<void>;
+  onDownload: (path: string, options?: { archive?: boolean }) => void | Promise<void>;
 }) {
   return (
     <div className="fixed inset-0 z-50 bg-th-base">
@@ -1129,6 +1140,13 @@ function FileBrowserModal({
           <h2 className="text-sm font-medium text-th-text truncate">{rootName}</h2>
           <p className="text-xs text-th-text-dim truncate">/{currentPath || ''}</p>
         </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onDownload(currentPath, { archive: true })}
+            className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
+          >
+            打包下载
+          </button>
         {parentPath !== null && (
           <button
             onClick={() => onNavigate(parentPath)}
@@ -1137,6 +1155,7 @@ function FileBrowserModal({
             返回上级
           </button>
         )}
+        </div>
       </div>
 
       <div
@@ -1160,9 +1179,8 @@ function FileBrowserModal({
                 : '下载文件会弹出另存为窗口；若浏览器不支持，则回退到默认下载目录'}
             </div>
             {entries.map((entry) => (
-              <button
+              <div
                 key={entry.path}
-                onClick={() => entry.isDirectory ? onNavigate(entry.path) : onDownload(entry.path)}
                 className="w-full flex items-center gap-3 rounded-xl border border-th-border/40 bg-th-surface px-3 py-3 text-left hover:bg-th-hover/40"
               >
                 <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${entry.isDirectory ? 'bg-blue-500/15 text-blue-300' : 'bg-emerald-500/15 text-emerald-300'}`}>
@@ -1176,16 +1194,27 @@ function FileBrowserModal({
                     </svg>
                   )}
                 </div>
-                <div className="min-w-0 flex-1">
+                <button
+                  onClick={() => entry.isDirectory ? onNavigate(entry.path) : onDownload(entry.path)}
+                  className="min-w-0 flex-1 text-left"
+                >
                   <div className="text-sm text-th-text truncate">{entry.name}</div>
                   <div className="text-[11px] text-th-text-dim">
                     {entry.isDirectory ? '文件夹' : `${(entry.size / 1024).toFixed(entry.size > 1024 ? 1 : 0)} KB`} · {new Date(entry.modifiedAt).toLocaleString('zh-CN')}
                   </div>
-                </div>
-                {!entry.isDirectory && downloadingPath === entry.path && (
+                </button>
+                {entry.isDirectory ? (
+                  <button
+                    onClick={() => onDownload(entry.path, { archive: true })}
+                    className="shrink-0 text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
+                    title="打包下载目录"
+                  >
+                    {downloadingPath === entry.path ? '打包中...' : '打包下载'}
+                  </button>
+                ) : downloadingPath === entry.path ? (
                   <span className="text-xs text-emerald-300 shrink-0">下载中...</span>
-                )}
-              </button>
+                ) : null}
+              </div>
             ))}
           </div>
         )}
@@ -1196,14 +1225,15 @@ function FileBrowserModal({
 
 /** 空状态提示 */
 function EmptyState() {
+  const { appName, t } = useLocale();
   return (
     <div className="flex flex-col items-center justify-center h-full text-center px-6">
       <div className="w-16 h-16 rounded-2xl overflow-hidden mb-4">
-        <img src="/icon-192.png" alt="ClawChat" className="w-full h-full object-cover" />
+        <img src="/icon-192.png" alt={appName} className="w-full h-full object-cover" />
       </div>
-      <h2 className="text-lg font-semibold text-th-text mb-2">欢迎使用 ClawChat</h2>
+      <h2 className="text-lg font-semibold text-th-text mb-2">{t('welcomeTitle')}</h2>
       <p className="text-sm text-th-text-muted mb-6 max-w-xs">
-        已连接 OpenClaw 智能体，发送消息开始对话。支持流式输出、工具调用、文件上传。
+        {t('welcomeDescription')}
       </p>
     </div>
   );

@@ -3,6 +3,7 @@ import { useChatStore } from '../stores/chatStore';
 import { apiClient } from '../services/api-client';
 import type { ServerConfig } from '../types';
 import { useTheme } from '../hooks/useTheme';
+import { useLocale } from '../hooks/useLocale';
 
 /**
  * 登录页面 - 输入服务器地址和连接密码
@@ -10,6 +11,7 @@ import { useTheme } from '../hooks/useTheme';
 export default function LoginPage() {
   const { connect, connectionStatus, errorMessage } = useChatStore();
   const { theme, toggleTheme } = useTheme();
+  const { appName, t } = useLocale();
 
   const [host, setHost] = useState(() => {
     try {
@@ -96,11 +98,11 @@ export default function LoginPage() {
       <div className="mb-8 text-center">
         <img
           src="/icon-192.png"
-          alt="ClawChat"
+          alt={appName}
           className="w-20 h-20 mx-auto mb-4 rounded-2xl shadow-lg shadow-emerald-500/20"
         />
-        <h1 className="text-2xl font-bold text-th-text">ClawChat</h1>
-        <p className="text-sm text-th-text-muted mt-1">连接到 OpenClaw 服务</p>
+        <h1 className="text-2xl font-bold text-th-text">{appName}</h1>
+        <p className="text-sm text-th-text-muted mt-1">{t('loginSubtitle')}</p>
       </div>
 
       {/* 表单 */}
@@ -112,13 +114,13 @@ export default function LoginPage() {
             type="text"
             value={host}
             onChange={(e) => setHost(e.target.value)}
-            placeholder="192.168.1.100:3210"
+            placeholder="http://example.com:3210"
             disabled={isConnecting || isPairingPending}
             className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
             onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
           />
           <p className="text-xs text-th-text-faint mt-1">
-            IP 地址自动使用 http，域名自动使用 https
+            请输入完整地址，包含 `http://` 或 `https://`
           </p>
         </div>
 
@@ -260,7 +262,6 @@ export default function LoginPage() {
 
       {/* 底部提示 */}
       <div className="text-xs text-th-text-faint mt-8 text-center space-y-1">
-        <p>兼容 qingchencloud/clawapp 协议</p>
         <p>SSE+POST 架构 · Ed25519 设备签名</p>
       </div>
     </div>

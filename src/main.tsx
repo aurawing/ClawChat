@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { Capacitor } from '@capacitor/core';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import App from './App';
+import { applyLocaleSideEffects } from './i18n';
 import './index.css';
 
 // ===== 初始化主题 class（在 React 渲染前，避免闪烁）=====
@@ -16,6 +17,8 @@ import './index.css';
     document.documentElement.classList.add('dark');
   }
 })();
+
+applyLocaleSideEffects();
 
 // ===== 原生平台初始化 =====
 async function initNative() {

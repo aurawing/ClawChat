@@ -11,14 +11,16 @@ const REQUEST_TIMEOUT = 30000;
 const MAX_RECONNECT_DELAY = 30000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 
-/** 推断 baseUrl 协议 */
+/** 解析 baseUrl，要求用户显式填写协议 */
 function resolveBaseUrl(host: string): string {
-  if (/^https?:\/\//i.test(host)) return host.replace(/\/+$/, '');
-  const hostOnly = host.split(':')[0];
-  const isIP = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostOnly);
-  const isLocal = hostOnly === 'localhost' || hostOnly === '127.0.0.1';
-  const protocol = isIP || isLocal ? 'http' : 'https';
-  return `${protocol}://${host}`;
+  const trimmed = host.trim();
+  if (!trimmed) {
+    throw new Error('请输入服务器地址');
+  }
+  if (!/^https?:\/\//i.test(trimmed)) {
+    throw new Error('服务器地址需包含 http:// 或 https://');
+  }
+  return trimmed.replace(/\/+$/, '');
 }
 
 export function uuid(): string {
@@ -637,19 +639,23 @@ export class ApiClient {
     return {
       rootName: data.rootName || '文件',
       currentPath: data.currentPath || '',
-      parentPath: data.parentPath || null,
+      parentPath: data.parentPath ?? null,
       entries: data.entries || [],
     };
   }
 
-  async downloadBrowserFile(sessionKey: string, path: string): Promise<{ blob: Blob; fileName: string }> {
+  async downloadBrowserFile(
+    sessionKey: string,
+    path: string,
+    options?: { archive?: boolean }
+  ): Promise<{ blob: Blob; fileName: string }> {
     if (!this._baseUrl || !this._sid) throw new Error('未连接');
     if (!sessionKey) throw new Error('缺少 sessionKey');
 
     const res = await fetch(`${this._baseUrl}/api/files/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sid: this._sid, sessionKey, path }),
+      body: JSON.stringify({ sid: this._sid, sessionKey, path, archive: !!options?.archive }),
     });
 
     if (!res.ok) {

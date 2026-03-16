@@ -18,6 +18,7 @@ import { config } from 'dotenv';
 import express from 'express';
 import { createServer } from 'http';
 import { WebSocket } from 'ws';
+import archiver from 'archiver';
 import { fileURLToPath } from 'url';
 import { dirname, join, resolve, normalize, basename, extname } from 'path';
 import {
@@ -454,7 +455,6 @@ function resolvePluginFilePath(rawPath) {
     if (!existsSync(candidate)) continue;
     try {
       const stat = statSync(candidate);
-      if (!stat.isFile()) continue;
       return {
         absolutePath: candidate,
         fileName: basename(candidate),
@@ -465,6 +465,14 @@ function resolvePluginFilePath(rawPath) {
     }
   }
   return null;
+}
+
+function buildArchiveName(name) {
+  const base = String(name || 'archive')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim() || 'archive';
+  return base.toLowerCase().endsWith('.zip') ? base : `${base}.zip`;
 }
 
 async function callClawChatFilesRPC(sid, action, params) {
@@ -1217,7 +1225,7 @@ app.get('/api/files', async (req, res) => {
 
 /** POST /api/files/download — 下载当前会话目录下的文件（通过 clawchatfiles 插件解析） */
 app.post('/api/files/download', async (req, res) => {
-  const { sid, sessionKey, path: rawPath } = req.body || {};
+  const { sid, sessionKey, path: rawPath, archive } = req.body || {};
   const session = sessions.get(String(sid || ''));
   if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
   if (!sessionKey) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
@@ -1231,22 +1239,48 @@ app.post('/api/files/download', async (req, res) => {
     if (!result?.exists) {
       return res.status(404).json({ ok: false, error: '文件不存在' });
     }
-    if (!result?.isFile) {
-      return res.status(400).json({ ok: false, error: '只能下载文件' });
-    }
 
-    const localFile = resolvePluginFilePath(result.absolutePath);
-    if (!localFile) {
+    const localTarget = resolvePluginFilePath(result.absolutePath);
+    if (!localTarget) {
       return res.status(500).json({
         ok: false,
         error: '插件返回的文件路径在代理侧不可访问，请检查 OpenClaw 与代理的目录映射配置',
       });
     }
 
+    if (archive) {
+      if (!localTarget.stat.isDirectory()) {
+        return res.status(400).json({ ok: false, error: '只能打包下载目录' });
+      }
+
+      const archiveName = buildArchiveName(result.name || localTarget.fileName || 'archive');
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(archiveName)}`);
+      res.setHeader('Cache-Control', 'no-store');
+
+      const zip = archiver('zip', { zlib: { level: 9 } });
+      zip.on('error', (err) => {
+        log.warn('目录打包下载失败:', err?.message || err);
+        if (!res.headersSent) {
+          res.status(500).json({ ok: false, error: '目录打包失败' });
+          return;
+        }
+        res.destroy(err);
+      });
+      zip.pipe(res);
+      zip.directory(localTarget.absolutePath, result.name || localTarget.fileName);
+      await zip.finalize();
+      return;
+    }
+
+    if (!localTarget.stat.isFile()) {
+      return res.status(400).json({ ok: false, error: '只能下载文件' });
+    }
+
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.name || localFile.fileName)}`);
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.name || localTarget.fileName)}`);
     res.setHeader('Cache-Control', 'no-store');
-    res.sendFile(localFile.absolutePath);
+    res.sendFile(localTarget.absolutePath);
   } catch (e) {
     const message = (e && e.message) || '';
     if (/does not match plugin filter/i.test(message)) {
