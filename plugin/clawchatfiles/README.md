@@ -23,7 +23,19 @@ plugin/
 
 ## 安装
 
-本插件现在已经是一个独立 npm 包目录，可以通过以下方式安装：
+本插件已经发布到 npm，推荐直接通过 OpenClaw CLI 安装：
+
+```bash
+openclaw plugins install @claw_chat/clawchatfiles
+```
+
+安装完成后建议检查：
+
+```bash
+openclaw plugins list
+```
+
+如果你需要本地联调，也可以通过以下方式安装：
 
 ```bash
 cd plugin/clawchatfiles
@@ -54,9 +66,7 @@ openclaw plugins install ./plugin/clawchatfiles
 如果本机已经安装 `openclaw` CLI，建议按下面顺序测试：
 
 ```bash
-cd plugin/clawchatfiles
-npm pack
-openclaw plugins install ./claw_chat-clawchatfiles-1.0.0.tgz
+openclaw plugins install @claw_chat/clawchatfiles
 openclaw plugins list
 openclaw setup
 ```

@@ -27,6 +27,10 @@ The mobile app talks to the proxy server, and the proxy keeps a shared upstream 
 
 ## Quick Start
 
+If you want to use the npm-published plugin and proxy directly, start with:
+
+- `QUICKSTART.en.md`
+
 ### 1. Install dependencies
 
 ```bash

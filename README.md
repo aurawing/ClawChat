@@ -57,6 +57,10 @@ OpenClaw 移动聊天客户端，基于 Capacitor + React + TypeScript 构建。
 
 ## 快速开始
 
+如果你希望直接使用已经发布到 npm 的插件和代理服务，可先阅读：
+
+- `QUICKSTART.md`
+
 ### 1. 安装依赖
 
 ```bash
