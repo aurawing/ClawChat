@@ -162,9 +162,10 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
               )}
               <button
                 onClick={() => removeAttachment(att.id)}
-                className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center text-white text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                className="absolute top-1 right-1 z-10 w-4 h-4 rounded-full bg-black/70 flex items-center justify-center text-white text-[10px] leading-none shadow-sm transition-colors hover:bg-red-500"
+                title="删除附件"
               >
-                ×
+                X
               </button>
             </div>
           ))}

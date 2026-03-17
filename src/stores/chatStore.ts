@@ -1194,6 +1194,25 @@ export const useChatStore = create<ChatState>((set, get) => {
 
   /** 处理 agent 事件 */
   function handleAgentEvent(payload: AgentEventPayload) {
+    // ====== 拦截标题生成会话的 agent 事件 ======
+    if (payload.sessionKey && titleGenMap.has(payload.sessionKey)) {
+      const gen = titleGenMap.get(payload.sessionKey)!;
+      const text = typeof payload.data?.text === 'string'
+        ? stripThinkingTags(payload.data.text).trim()
+        : '';
+      if (payload.stream === 'assistant' && text) {
+        gen.accumText = text;
+      } else if (payload.stream === 'lifecycle') {
+        const phase = String(payload.data?.phase || '').toLowerCase();
+        if (phase === 'end') {
+          gen.resolve(gen.accumText.trim() || '新对话');
+        } else if (phase === 'error' || phase === 'aborted') {
+          gen.resolve(gen.accumText.trim() || '新对话');
+        }
+      }
+      return;
+    }
+
     const state = get();
     // 非当前会话 → 路由到后台缓冲区（不丢弃）
     if (payload.sessionKey && payload.sessionKey !== state.currentSessionKey) {
