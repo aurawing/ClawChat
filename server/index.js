@@ -458,6 +458,134 @@ function mimeToExt(mime) {
   return map[mime] || (mime?.split('/')?.[1]?.replace(/[^a-z0-9]/gi, '') || 'bin');
 }
 
+const MAX_EXTRACTED_DOC_CHARS_PER_FILE = 16000;
+const MAX_EXTRACTED_DOC_CHARS_TOTAL = 48000;
+let pdfParseLoader = null;
+let mammothLoader = null;
+
+function getAttachmentMime(att) {
+  return String(att?.mimeType || att?.type || 'application/octet-stream').trim().toLowerCase();
+}
+
+function getAttachmentName(att) {
+  return String(att?.fileName || att?.name || 'attachment').trim() || 'attachment';
+}
+
+function normalizeExtractedText(text) {
+  return String(text || '')
+    .replace(/\u0000/g, '')
+    .replace(/\r/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function isTextExtractableAttachment(mime, fileName) {
+  const lowerName = String(fileName || '').toLowerCase();
+  return (
+    mime === 'application/pdf' ||
+    mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    mime === 'application/msword' ||
+    mime === 'text/plain' ||
+    mime === 'text/markdown' ||
+    mime === 'application/json' ||
+    mime === 'text/csv' ||
+    /\.pdf$/i.test(lowerName) ||
+    /\.docx$/i.test(lowerName) ||
+    /\.doc$/i.test(lowerName) ||
+    /\.(txt|md|json|csv)$/i.test(lowerName) ||
+    mime.startsWith('text/')
+  );
+}
+
+async function loadPdfParse() {
+  if (!pdfParseLoader) {
+    pdfParseLoader = import('pdf-parse').then((mod) => mod.default || mod);
+  }
+  return pdfParseLoader;
+}
+
+async function loadMammoth() {
+  if (!mammothLoader) {
+    mammothLoader = import('mammoth');
+  }
+  return mammothLoader;
+}
+
+async function extractAttachmentText(att) {
+  if (!att?.content) return { supported: false, text: '' };
+
+  const mime = getAttachmentMime(att);
+  const fileName = getAttachmentName(att);
+  if (!isTextExtractableAttachment(mime, fileName)) {
+    return { supported: false, text: '' };
+  }
+
+  const buffer = Buffer.from(String(att.content || ''), 'base64');
+  if (!buffer.length) return { supported: false, text: '' };
+
+  try {
+    if (mime === 'application/pdf' || /\.pdf$/i.test(fileName)) {
+      const pdfParse = await loadPdfParse();
+      const parsed = await pdfParse(buffer);
+      return { supported: true, text: normalizeExtractedText(parsed?.text) };
+    }
+
+    if (
+      mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      /\.docx$/i.test(fileName)
+    ) {
+      const mammoth = await loadMammoth();
+      const parsed = await mammoth.extractRawText({ buffer });
+      return { supported: true, text: normalizeExtractedText(parsed?.value) };
+    }
+
+    if (mime === 'application/msword' || /\.doc$/i.test(fileName)) {
+      return { supported: false, text: '' };
+    }
+
+    return { supported: true, text: normalizeExtractedText(buffer.toString('utf8')) };
+  } catch (error) {
+    log.warn(`提取附件文本失败: ${fileName} (${error.message})`);
+    return { supported: true, text: '' };
+  }
+}
+
+async function buildDocumentContext(attachments) {
+  const sections = [];
+  const unsupported = [];
+  let totalChars = 0;
+
+  for (const att of attachments || []) {
+    const mime = getAttachmentMime(att);
+    if (mime.startsWith('image/')) continue;
+
+    const fileName = getAttachmentName(att);
+    const extracted = await extractAttachmentText(att);
+    if (!extracted.supported) {
+      unsupported.push(fileName);
+      continue;
+    }
+
+    if (!extracted.text) continue;
+
+    const remaining = MAX_EXTRACTED_DOC_CHARS_TOTAL - totalChars;
+    if (remaining <= 0) break;
+
+    const snippet = extracted.text.slice(0, Math.min(MAX_EXTRACTED_DOC_CHARS_PER_FILE, remaining));
+    totalChars += snippet.length;
+    sections.push(`[文档] ${fileName}\n${snippet}`);
+  }
+
+  if (sections.length === 0 && unsupported.length === 0) return '';
+
+  const parts = ['以下是用户本轮上传文档中提取的正文内容，请结合这些内容回答。'];
+  if (sections.length > 0) parts.push(sections.join('\n\n'));
+  if (unsupported.length > 0) {
+    parts.push(`以下附件已上传，但当前代理暂不支持直接提取正文：${unsupported.join('，')}`);
+  }
+  return parts.join('\n\n').trim();
+}
+
 // 预编译常用 SQL
 const stmts = {
   // 标题
@@ -1442,6 +1570,16 @@ app.post('/api/send', async (req, res) => {
       }
     });
     saveAtt(params.attachments);
+
+    const docContext = await buildDocumentContext(params.attachments);
+    if (docContext) {
+      const originalMessage = String(params.message || params.content || '').trim();
+      const mergedMessage = originalMessage
+        ? `${originalMessage}\n\n${docContext}`
+        : docContext;
+      params.message = mergedMessage;
+      params.content = mergedMessage;
+    }
   }
 
   try {
