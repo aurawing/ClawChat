@@ -2,6 +2,7 @@
   "name": "@claw_chat/clawchat-proxy",
   "version": "1.0.0",
   "description": "ClawChat SSE+POST 代理服务端 - 兼容 ClawApp 协议",
+  "license": "MIT",
   "type": "module",
   "main": "index.js",
   "bin": {
