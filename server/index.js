@@ -460,6 +460,8 @@ function mimeToExt(mime) {
 
 const MAX_EXTRACTED_DOC_CHARS_PER_FILE = 16000;
 const MAX_EXTRACTED_DOC_CHARS_TOTAL = 48000;
+const DOC_CONTEXT_START = '[CLAWCHAT_DOC_CONTEXT_BEGIN]';
+const DOC_CONTEXT_END = '[CLAWCHAT_DOC_CONTEXT_END]';
 let pdfParseLoader = null;
 let mammothLoader = null;
 
@@ -578,11 +580,15 @@ async function buildDocumentContext(attachments) {
 
   if (sections.length === 0 && unsupported.length === 0) return '';
 
-  const parts = ['以下是用户本轮上传文档中提取的正文内容，请结合这些内容回答。'];
+  const parts = [
+    DOC_CONTEXT_START,
+    '以下是用户本轮上传文档中提取的正文内容，请结合这些内容回答。',
+  ];
   if (sections.length > 0) parts.push(sections.join('\n\n'));
   if (unsupported.length > 0) {
     parts.push(`以下附件已上传，但当前代理暂不支持直接提取正文：${unsupported.join('，')}`);
   }
+  parts.push(DOC_CONTEXT_END);
   return parts.join('\n\n').trim();
 }
 

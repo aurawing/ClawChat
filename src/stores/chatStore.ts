@@ -61,6 +61,16 @@ function stripOperatorInjectedContent(text: string): string {
   );
   // 去除 operator 指令前缀
   text = text.replace(/^##\s*(?:System|Operator)\s+(?:Message|Instructions?)[\s\S]*?(?=\n{2,}|$)/gim, '');
+  // 去除 ClawChat 注入的文档正文上下文（新版：带明确边界标记）
+  text = text.replace(
+    /\n*\[CLAWCHAT_DOC_CONTEXT_BEGIN\][\s\S]*?\[CLAWCHAT_DOC_CONTEXT_END\]\s*/g,
+    ''
+  );
+  // 去除 ClawChat 注入的文档正文上下文（兼容旧版：无边界标记）
+  text = text.replace(
+    /\n*以下是用户本轮上传文档中提取的正文内容，请结合这些内容回答。[^\S\r\n]*[\s\S]*$/g,
+    ''
+  );
   return text.trim();
 }
 
