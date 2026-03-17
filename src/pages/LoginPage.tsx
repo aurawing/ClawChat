@@ -6,7 +6,7 @@ import { useTheme } from '../hooks/useTheme';
 import { useLocale } from '../hooks/useLocale';
 
 /**
- * 登录页面 - 输入服务器地址和连接密码
+ * 登录页面 - 输入服务器地址、用户名和用户密码
  */
 export default function LoginPage() {
   const { connect, connectionStatus, errorMessage } = useChatStore();
@@ -43,12 +43,12 @@ export default function LoginPage() {
   const isPairingPending = connectionStatus === 'pairing_pending';
 
   const handleConnect = useCallback(() => {
-    if (!host.trim()) return;
+    if (!host.trim() || !username.trim() || !token.trim()) return;
 
     const config: ServerConfig = {
       host: host.trim().replace(/\/+$/, ''),
       token: token.trim(),
-      username: username.trim() || undefined,
+      username: username.trim(),
     };
 
     connect(config);
@@ -63,7 +63,7 @@ export default function LoginPage() {
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('clawchat-config') || '{}');
-      if (saved.host && saved.token) {
+      if (saved.host && saved.token && saved.username) {
         connect(saved);
       }
     } catch {
@@ -114,7 +114,7 @@ export default function LoginPage() {
             type="text"
             value={host}
             onChange={(e) => setHost(e.target.value)}
-            placeholder="http://example.com:3210"
+            placeholder="http://example.com:18888"
             disabled={isConnecting || isPairingPending}
             className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
             onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
@@ -124,15 +124,32 @@ export default function LoginPage() {
           </p>
         </div>
 
-        {/* 连接密码 */}
+        {/* 用户名 */}
         <div>
-          <label className="block text-sm text-th-text-muted mb-1.5">连接密码</label>
+          <label className="block text-sm text-th-text-muted mb-1.5">用户名</label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="~/.clawchat-proxy 中的用户名"
+            disabled={isConnecting || isPairingPending}
+            className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
+            onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
+          />
+          <p className="text-xs text-th-text-faint mt-1">
+            需与 `~/.clawchat-proxy` 中 `PROXY_USERS` 配置的用户名一致
+          </p>
+        </div>
+
+        {/* 用户密码 */}
+        <div>
+          <label className="block text-sm text-th-text-muted mb-1.5">用户密码</label>
           <div className="relative">
             <input
               type={showToken ? 'text' : 'password'}
               value={token}
               onChange={(e) => setToken(e.target.value)}
-              placeholder="server/.env 中的 PROXY_TOKEN"
+              placeholder="对应用户名的密码"
               disabled={isConnecting || isPairingPending}
               className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 pr-11 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
               onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
@@ -153,23 +170,6 @@ export default function LoginPage() {
               )}
             </button>
           </div>
-        </div>
-
-        {/* 用户名 */}
-        <div>
-          <label className="block text-sm text-th-text-muted mb-1.5">用户名 <span className="text-th-text-faint text-xs">(可选)</span></label>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="输入你的昵称，区分不同用户"
-            disabled={isConnecting || isPairingPending}
-            className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
-            onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
-          />
-          <p className="text-xs text-th-text-faint mt-1">
-            多用户模式下用于标识身份，单用户可不填
-          </p>
         </div>
 
         {/* 连接按钮 */}
@@ -197,7 +197,7 @@ export default function LoginPage() {
         ) : (
           <button
             onClick={handleConnect}
-            disabled={!host.trim()}
+            disabled={!host.trim() || !username.trim() || !token.trim()}
             className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-neutral-700 disabled:to-neutral-700 text-white font-medium text-sm transition-all disabled:cursor-not-allowed"
           >
             {showError ? '重试' : '连接'}
@@ -254,7 +254,7 @@ export default function LoginPage() {
               {connectionStatus === 'auth_failed' ? '🔒 认证失败' : '❌ 连接失败'}
             </p>
             <p className="text-red-400/80 text-xs">
-              {errorMessage || (connectionStatus === 'auth_failed' ? '请检查连接密码是否正确' : '请检查服务器地址和网络')}
+              {errorMessage || (connectionStatus === 'auth_failed' ? '请检查用户名和用户密码是否正确' : '请检查服务器地址和网络')}
             </p>
           </div>
         )}

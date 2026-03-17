@@ -1,9 +1,9 @@
 // ===== 连接配置 =====
 
 export interface ServerConfig {
-  host: string; // 服务器地址 (如 192.168.1.100:3210)
-  token: string; // 连接密码
-  username?: string; // 用户名（多用户模式下用于标识身份）
+  host: string; // 服务器地址 (如 192.168.1.100:18888)
+  token: string; // 用户密码
+  username: string; // 用户名（必填）
 }
 
 // ===== 连接状态 =====

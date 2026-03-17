@@ -1,6 +1,6 @@
 # ClawChat
 
-OpenClaw 移动聊天客户端，基于 Capacitor + React + TypeScript 构建，兼容 `qingchencloud/clawapp` 协议。
+OpenClaw 移动聊天客户端，基于 Capacitor + React + TypeScript 构建。
 
 ## 功能特性
 
@@ -11,7 +11,7 @@ OpenClaw 移动聊天客户端，基于 Capacitor + React + TypeScript 构建，
 - **会话管理** — 多会话切换、删除，支持多智能体
 - **离线缓存** — IndexedDB 本地持久化消息，断网可查看历史
 - **自动重连** — 指数退避重连 + SSE 断线续传 + 消息去重
-- **登录鉴权** — PROXY_TOKEN 密码认证
+- **登录鉴权** — `PROXY_USERS` 多用户账号密码认证
 - **Ed25519 设备签名** — 代理服务端自动生成设备密钥，兼容 OpenClaw 2.13+ 认证
 - **AI 自动标题** — 第一轮对话结束后由 AI 总结主题并替换默认标题
 - **深色主题** — 类 ChatGPT 暗色 UI，适配安全区域
@@ -26,7 +26,7 @@ OpenClaw 移动聊天客户端，基于 Capacitor + React + TypeScript 构建，
           │ SSE (事件流) + HTTP POST (RPC)
           ▼
 ┌─────────────────────┐
-│  ClawChat Server    │  ← Node.js 代理服务 (端口 3210)
+│  ClawChat Server    │  ← Node.js 代理服务 (端口 18888)
 │  Express + SSE      │
 └─────────┬───────────┘
           │ WebSocket + Ed25519 设备签名
@@ -71,32 +71,50 @@ cd ..
 
 ### 2. 启动后端代理服务
 
-**首次启动会自动生成配置文件 `server/.env`，并输出自动生成的连接密码。**
+**首次启动会进入引导，并在用户目录下生成配置文件 `~/.clawchat-proxy`。**
 
 ```bash
-cd server
-node index.js
+npx clawchat-proxy
 ```
 
 首次启动时你会看到：
 
 ```
-[INFO] 首次启动，已自动创建 server/.env 配置文件
-[INFO] 自动生成的连接密码: xxxxxxxxxxxx
+欢迎使用 ClawChat Proxy 初始化向导
+配置文件将写入: ~/.clawchat-proxy
+配置已写入: ~/.clawchat-proxy
 ```
 
-**记住这个密码**，在 App 登录时需要填写。
+填写好 `PROXY_USERS` 后，在 App 登录时输入对应的用户名和密码即可。后续直接运行 `npx clawchat-proxy` 即可启动。
+
+### 2.1 本地验证 `npm link`
+
+如果你还没发布到 npm，可以先本地验证 CLI：
+
+```bash
+cd server
+npm link
+clawchat-proxy --setup
+clawchat-proxy
+```
+
+如果想取消全局链接：
+
+```bash
+cd server
+npm unlink -g clawchat-proxy
+```
 
 ### 3. 配置（可选）
 
-如需自定义配置，编辑 `server/.env`：
+如需自定义配置，编辑 `~/.clawchat-proxy`：
 
 ```env
 # 代理服务端口
-PROXY_PORT=3210
+PROXY_PORT=18888
 
-# 客户端连接密码（登录时填写的 Token）
-PROXY_TOKEN=你的连接密码
+# 客户端账号（格式：用户名:密码,用户名2:密码2）
+PROXY_USERS=alice:password1,bob:password2
 
 # OpenClaw Gateway 地址
 OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789
@@ -107,20 +125,31 @@ OPENCLAW_GATEWAY_TOKEN=
 # OpenClaw Gateway 认证密码（优先于 token，与 token 二选一）
 OPENCLAW_GATEWAY_PASSWORD=
 
-# 允许下载的构建产物目录（逗号分隔）
-DOWNLOAD_ROOTS=../dist,../android/app/build/outputs,../build,../out,../release
+# 允许下载的目录白名单（默认仅开放 OpenClaw 会话文件目录）
+DOWNLOAD_ROOTS=~/.openclaw/workspace/sessions
+
+# 可选：将智能体输出中的虚拟路径映射到本机真实路径
+DOWNLOAD_PATH_MAPS=
+
+# 日志级别
+LOG_LEVEL=info
+
+# 允许的跨域来源（留空表示允许全部）
+ALLOWED_ORIGINS=
 ```
 
 **关键配置说明：**
 
 | 变量 | 说明 | 如何获取 |
 |------|------|---------|
-| `PROXY_TOKEN` | 客户端连接代理服务的密码 | 首次启动自动生成，或自行修改 |
-| `OPENCLAW_GATEWAY_TOKEN` | OpenClaw Gateway 认证 Token | 查看 `~/.openclaw/gateway.yaml` 中的 `token` 字段 |
+| `PROXY_USERS` | 客户端可登录的多用户账号 | 格式为 `用户名:密码,用户名2:密码2` |
+| `OPENCLAW_GATEWAY_TOKEN` | OpenClaw Gateway 认证 Token | 首次引导会优先尝试从 `~/.openclaw/openclaw.json` 自动读取 |
 | `OPENCLAW_GATEWAY_PASSWORD` | Gateway 认证密码（优先于 Token） | 在 OpenClaw 中设置的密码 |
-| `DOWNLOAD_ROOTS` | 允许被客户端下载的产物目录白名单 | 逗号分隔路径，支持相对 `server/` 的路径 |
+| `DOWNLOAD_ROOTS` | 允许被客户端下载的目录白名单 | 逗号分隔路径，支持相对配置文件目录的路径和 `~/` |
+| `DOWNLOAD_PATH_MAPS` | 虚拟路径到本机真实路径的映射 | 例如 `/root/.openclaw/workspace=>~/workspace` |
+| `ALLOWED_ORIGINS` | 允许的跨域来源 | 留空表示允许全部 |
 
-> **注意：** 如果 OpenClaw 启用了设备配对机制，首次连接可能需要在 OpenClaw 端手动批准设备。代理服务会自动生成 Ed25519 设备密钥（保存在 `server/.device-key.json`）。
+> **注意：** 如果 OpenClaw 启用了设备配对机制，首次连接可能需要在 OpenClaw 端手动批准设备。代理服务会自动生成 Ed25519 设备密钥，运行数据默认保存在 `~/.clawchat-proxy-data/`。
 
 ### 4. 启动服务
 
@@ -145,18 +174,17 @@ npm run dev
 npm run build
 
 # 启动代理服务（同时托管前端静态文件）
-cd server
-node index.js
+npx clawchat-proxy
 ```
 
-访问 `http://你的服务器IP:3210` 即可使用。
+访问 `http://你的服务器IP:18888` 即可使用。
 
 ### 5. App 中登录
 
 1. 打开 App（浏览器或 Capacitor 原生应用）
 2. 在登录页填写：
-   - **服务器地址**：`192.168.1.100:3210`（IP 地址自动使用 http，域名自动使用 https）
-   - **连接密码**：`server/.env` 中的 `PROXY_TOKEN`
+   - **服务器地址**：`http://192.168.1.100:18888`
+   - **用户名 / 密码**：`~/.clawchat-proxy` 中 `PROXY_USERS` 里对应的一组账号
 3. 点击「连接」
 
 连接成功后自动进入聊天界面。
@@ -200,7 +228,7 @@ AI 的回复会以流式方式逐字展示：
 说明：
 
 - 下载通过代理服务的 `/api/download-file` 接口完成
-- 请求使用登录时的 token 放在 `Authorization` 请求头中，不会把 token 暴露到 URL
+- 请求使用登录时的用户密码放在 `Authorization` 请求头中，并额外带上 `X-Proxy-User`
 - 只有 `DOWNLOAD_ROOTS` 白名单目录内的文件允许下载
 - 工具调用面板中的原始输出不会自动出现下载按钮，下载入口只出现在助手最终正文中
 
@@ -273,7 +301,7 @@ npm run cap:open:ios
 
 ### 方案 A：反向代理（推荐）
 
-使用 Nginx/Caddy 反向代理 `localhost:3210`，并配置 HTTPS 证书：
+使用 Nginx/Caddy 反向代理 `localhost:18888`，并配置 HTTPS 证书：
 
 ```nginx
 server {
@@ -284,7 +312,7 @@ server {
     ssl_certificate_key /path/to/key.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:3210;
+        proxy_pass http://127.0.0.1:18888;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -304,7 +332,7 @@ App 中服务器地址填写：`chat.your-domain.com`（域名自动使用 https
 ### 方案 C：SSH 隧道
 
 ```bash
-ssh -R 3210:localhost:3210 your-server
+ssh -R 18888:localhost:18888 your-server
 ```
 
 ---
@@ -313,11 +341,11 @@ ssh -R 3210:localhost:3210 your-server
 
 | 路由 | 方法 | 说明 |
 |------|------|------|
-| `/api/connect` | POST | 建立代理会话，验证 Token，连接 Gateway |
+| `/api/connect` | POST | 建立代理会话，验证用户名和密码，连接 Gateway |
 | `/api/events?sid=xxx` | GET | SSE 事件流，接收 Gateway 推送 |
 | `/api/send` | POST | 发送 RPC 请求（转发到 Gateway） |
 | `/api/disconnect` | POST | 断开代理会话 |
-| `/api/download-file` | POST | 下载白名单目录中的构建产物（Bearer Token 鉴权） |
+| `/api/download-file` | POST | 下载白名单目录中的文件（`Authorization` + `X-Proxy-User` 鉴权） |
 | `/api/progress?sid=xxx` | GET | 查询会话执行状态 |
 | `/health` | GET | 健康检查 |
 
@@ -350,12 +378,17 @@ ClawChat/
 ├── server/
 │   ├── index.js                   # 代理服务（Express + SSE + Ed25519）
 │   ├── package.json               # 后端依赖
-│   ├── .env                       # 环境变量（首次启动自动生成）
-│   └── .device-key.json           # Ed25519 设备密钥（自动生成）
 ├── android/                       # Capacitor Android 项目
 ├── capacitor.config.ts            # Capacitor 配置
 ├── vite.config.ts                 # Vite 构建配置
 └── package.json                   # 前端依赖 + 脚本
+```
+
+运行时文件默认写入：
+
+```text
+~/.clawchat-proxy
+~/.clawchat-proxy-data/
 ```
 
 ## 技术栈
@@ -371,38 +404,38 @@ ClawChat/
 | Markdown | react-markdown + rehype-highlight |
 | 后端 | Express 4 + ws (上游) |
 | 通信协议 | SSE + HTTP POST（客户端） / WebSocket（上游） |
-| 认证 | Ed25519 设备签名（Gateway） / Token（客户端） |
+| 认证 | Ed25519 设备签名（Gateway） / 用户名密码（客户端） |
 
 ## 常见问题
 
 ### Q: 连接失败怎么办？
 
 1. 确认 OpenClaw Gateway 已启动（默认端口 18789）
-2. 确认代理服务已启动（`cd server && node index.js`）
+2. 确认代理服务已启动（`npx clawchat-proxy`）
 3. 查看代理服务控制台的错误日志
-4. 检查 `server/.env` 中的 Gateway 地址和 Token 是否正确
-5. 检查 App 中填写的服务器地址和连接密码是否与 `.env` 中的 `PROXY_TOKEN` 一致
-6. 如果跨网络访问，确认防火墙已放行 3210 端口
+4. 检查 `~/.clawchat-proxy` 中的 Gateway 地址和认证信息是否正确
+5. 检查 App 中填写的服务器地址、用户名和密码是否与 `~/.clawchat-proxy` 中的 `PROXY_USERS` 一致
+6. 如果跨网络访问，确认防火墙已放行 18888 端口
 
 ### Q: 手机连不上本地服务？
 
-手机和电脑必须在同一局域网。服务器地址使用电脑的局域网 IP（如 `192.168.1.x:3210`），不能用 `localhost`。
+手机和电脑必须在同一局域网。服务器地址使用电脑的局域网 IP（如 `http://192.168.1.x:18888`），不能用 `localhost`。
 
 ### Q: Gateway 认证失败？
 
-- 检查 `server/.env` 中的 `OPENCLAW_GATEWAY_TOKEN` 或 `OPENCLAW_GATEWAY_PASSWORD` 是否正确
+- 检查 `~/.clawchat-proxy` 中的 `OPENCLAW_GATEWAY_TOKEN` 或 `OPENCLAW_GATEWAY_PASSWORD` 是否正确
 - 如果 OpenClaw 启用了设备配对，需在 OpenClaw 端批准新设备
-- 设备密钥保存在 `server/.device-key.json`，如需重新配对可删除此文件重启服务
+- 设备密钥保存在 `~/.clawchat-proxy-data/.device-key.json`，如需重新配对可删除此文件重启服务
 
 ### Q: 如何获取 OpenClaw Gateway Token？
 
-查看 OpenClaw 安装目录下的配置文件：
+首次引导会优先读取：
 
 ```bash
-cat ~/.openclaw/gateway.yaml
+cat ~/.openclaw/openclaw.json
 ```
 
-找到 `token` 字段的值即可。
+如果未自动识别成功，再手动查看其中 `gateway.auth` 下的配置并填入 `~/.clawchat-proxy`。
 
 ### Q: 文件上传大小限制？
 

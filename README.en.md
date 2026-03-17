@@ -1,6 +1,6 @@
 # ClawChat
 
-Mobile chat client for OpenClaw, built with Capacitor + React + TypeScript and compatible with the `qingchencloud/clawapp` protocol.
+Mobile chat client for OpenClaw, built with Capacitor + React + TypeScript.
 
 ## Highlights
 
@@ -11,7 +11,7 @@ Mobile chat client for OpenClaw, built with Capacitor + React + TypeScript and c
 - Auto reconnect with SSE resume and deduplication
 - AI-generated session titles after the first completed round
 - Download links for generated artifacts in the assistant's final answer
-- Token-authenticated proxy server with Ed25519 device signing for OpenClaw Gateway
+- Multi-user proxy server with Ed25519 device signing for OpenClaw Gateway
 
 ## Architecture
 
@@ -39,24 +39,46 @@ cd ..
 ### 2. Start the proxy server
 
 ```bash
-cd server
-node index.js
+npx clawchat-proxy
 ```
 
-On first launch, `server/.env` will be created automatically.
+On first launch, the CLI wizard creates `~/.clawchat-proxy`.
 
-### 3. Configure `server/.env`
+### 2.1 Local `npm link` verification
+
+Before publishing to npm, you can test the CLI locally:
+
+```bash
+cd server
+npm link
+clawchat-proxy --setup
+clawchat-proxy
+```
+
+To remove the global link later:
+
+```bash
+cd server
+npm unlink -g clawchat-proxy
+```
+
+### 3. Configure `~/.clawchat-proxy`
 
 ```env
-PROXY_PORT=3210
-PROXY_TOKEN=your-token
+PROXY_PORT=18888
+PROXY_USERS=alice:password1,bob:password2
 OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789
 OPENCLAW_GATEWAY_TOKEN=
 OPENCLAW_GATEWAY_PASSWORD=
-DOWNLOAD_ROOTS=../dist,../android/app/build/outputs,../build,../out,../release
+DOWNLOAD_ROOTS=~/.openclaw/workspace/sessions
+DOWNLOAD_PATH_MAPS=
+LOG_LEVEL=info
+ALLOWED_ORIGINS=
 ```
 
-`DOWNLOAD_ROOTS` is a comma-separated whitelist of directories that the client is allowed to download files from.
+`PROXY_USERS` is a comma-separated list of `username:password` pairs for app login.
+
+`DOWNLOAD_ROOTS` is a comma-separated whitelist of directories that the client is allowed to download files from. The default only exposes `~/.openclaw/workspace/sessions`.
 
 ### 4. Run frontend
 
@@ -71,8 +93,7 @@ Production:
 
 ```bash
 npm run build
-cd server
-node index.js
+npx clawchat-proxy
 ```
 
 ## Downloading Generated Files
@@ -88,8 +109,8 @@ the frontend turns it into a clickable download link.
 Rules:
 
 - Downloads go through `POST /api/download-file`
-- The client sends `Authorization: Bearer <token>`
-- The token is not exposed in the URL
+- The client sends `Authorization: Bearer <user-password>` and `X-Proxy-User`
+- Credentials are not exposed in the URL
 - Only files inside `DOWNLOAD_ROOTS` are allowed
 - Download actions are attached to the assistant's final answer, not the tool call panel
 

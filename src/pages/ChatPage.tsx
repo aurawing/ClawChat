@@ -618,11 +618,9 @@ export default function ChatPage() {
     [sendMessage]
   );
 
-  // 构造显示用的消息列表
-  const displayMessages = [...messages];
   const hasToolCards = toolCards.size > 0;
 
-  const liveBlocks = (() => {
+  const liveBlocks = useMemo(() => {
     if (!currentBlocks.length && !currentAiThinking && !currentAiText) return undefined;
     const blocks = [...currentBlocks];
     // 补全当前 thinking 段
@@ -642,13 +640,19 @@ export default function ChatPage() {
       }
     }
     return blocks.length > 0 ? blocks : undefined;
-  })();
+  }, [currentBlocks, currentAiThinking, currentAiText, _blockThinkingBase, _blockTextBase]);
 
-  if (currentAiText || hasToolCards || currentAiThinking) {
+  // 构造显示用的消息列表
+  const displayMessages = useMemo(() => {
+    const nextMessages = [...messages];
+    if (!(currentAiText || hasToolCards || currentAiThinking)) {
+      return nextMessages;
+    }
+
     const msgId = currentAiMessageId || 'ai-streaming';
-    const existing = displayMessages.find((m) => m.id === msgId);
+    const existing = nextMessages.find((m) => m.id === msgId);
     if (!existing) {
-      const streamingMsg: Message = {
+      nextMessages.push({
         id: msgId,
         sessionKey: currentSessionKey || '',
         role: 'assistant',
@@ -658,20 +662,21 @@ export default function ChatPage() {
         blocks: liveBlocks,
         createdAt: Date.now(),
         isStreaming: true,
-      };
-      displayMessages.push(streamingMsg);
-    } else {
-      const idx = displayMessages.indexOf(existing);
-      displayMessages[idx] = {
-        ...existing,
-        toolCalls: Array.from(toolCards.values()),
-        thinking: currentAiThinking || existing.thinking,
-        blocks: liveBlocks || existing.blocks,
-        content: currentAiText || existing.content,
-        isStreaming: true,
-      };
+      });
+      return nextMessages;
     }
-  }
+
+    const idx = nextMessages.indexOf(existing);
+    nextMessages[idx] = {
+      ...existing,
+      toolCalls: Array.from(toolCards.values()),
+      thinking: currentAiThinking || existing.thinking,
+      blocks: liveBlocks || existing.blocks,
+      content: currentAiText || existing.content,
+      isStreaming: true,
+    };
+    return nextMessages;
+  }, [messages, currentAiText, hasToolCards, currentAiThinking, currentAiMessageId, currentSessionKey, toolCards, liveBlocks]);
 
   const renderedMessages = useMemo(() => expandAssistantMessages(displayMessages), [displayMessages]);
 
@@ -911,11 +916,11 @@ function SettingsModal({
   const [showToken, setShowToken] = useState(false);
 
   const handleSave = () => {
-    if (!host.trim()) return;
+    if (!host.trim() || !username.trim() || !token.trim()) return;
     const config: ServerConfig = {
       host: host.trim().replace(/\/+$/, ''),
       token: token.trim(),
-      username: username.trim() || undefined,
+      username: username.trim(),
     };
     localStorage.setItem('clawchat-config', JSON.stringify(config));
     onSave(config);
@@ -965,20 +970,32 @@ function SettingsModal({
               type="text"
               value={host}
               onChange={(e) => setHost(e.target.value)}
-              placeholder="http://example.com:3210"
+              placeholder="http://example.com:18888"
               className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
             />
             <p className="text-xs text-th-text-faint mt-1">请输入完整地址，包含 `http://` 或 `https://`</p>
           </div>
 
           <div>
-            <label className="block text-sm text-th-text-muted mb-1.5">连接密码</label>
+            <label className="block text-sm text-th-text-muted mb-1.5">用户名</label>
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="~/.clawchat-proxy 中的用户名"
+              className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
+            />
+            <p className="text-xs text-th-text-faint mt-1">需与 `~/.clawchat-proxy` 中 `PROXY_USERS` 配置的用户名一致</p>
+          </div>
+
+          <div>
+            <label className="block text-sm text-th-text-muted mb-1.5">用户密码</label>
             <div className="relative">
               <input
                 type={showToken ? 'text' : 'password'}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                placeholder="PROXY_TOKEN"
+                placeholder="对应用户名的密码"
                 className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 pr-11 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
               />
               <button
@@ -999,18 +1016,6 @@ function SettingsModal({
             </div>
           </div>
 
-          <div>
-            <label className="block text-sm text-th-text-muted mb-1.5">
-              用户名 <span className="text-th-text-faint text-xs">(可选)</span>
-            </label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="昵称，区分不同用户"
-              className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
-            />
-          </div>
         </div>
 
         {/* 操作按钮 */}
@@ -1023,7 +1028,7 @@ function SettingsModal({
           </button>
           <button
             onClick={handleSave}
-            disabled={!host.trim()}
+            disabled={!host.trim() || !username.trim() || !token.trim()}
             className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-neutral-700 disabled:to-neutral-700 text-white text-sm font-medium transition-all disabled:cursor-not-allowed"
           >
             保存并重连

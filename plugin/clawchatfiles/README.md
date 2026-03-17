@@ -188,7 +188,7 @@ openclaw setup
   - 向插件调用 `clawchatfiles.resolve`
   - 再由代理服务负责实际文件流下载
 
-如果 OpenClaw 运行环境与代理服务不在同一文件系统中，需要在代理的 `server/.env` 中配置对应的 home 路径映射，例如：
+如果 OpenClaw 运行环境与代理服务不在同一文件系统中，需要在代理的 `~/.clawchat-proxy` 中配置对应的 home 路径映射，例如：
 
 ```env
 DOWNLOAD_PATH_MAPS=/home/<user>/.openclaw/workspace=>../workspace

@@ -1,6 +1,6 @@
+#!/usr/bin/env node
 /**
  * ClawChat SSE + HTTP POST 代理服务端
- * 完全兼容 qingchencloud/clawapp 协议
  *
  * 架构：
  * - 多个 APP ←SSE+POST→ 代理服务端 ←共享WS→ OpenClaw Gateway
@@ -20,17 +20,37 @@ import { createServer } from 'http';
 import { WebSocket } from 'ws';
 import archiver from 'archiver';
 import { fileURLToPath } from 'url';
-import { dirname, join, resolve, normalize, basename, extname } from 'path';
+import { dirname, join, resolve, normalize, basename, extname, isAbsolute } from 'path';
+import { homedir } from 'os';
+import { argv, exit, stdin as input, stdout as output } from 'process';
+import { createInterface } from 'readline/promises';
 import {
-  randomUUID, randomBytes, generateKeyPairSync, createHash,
+  randomUUID, generateKeyPairSync, createHash,
   sign as ed25519Sign, createPrivateKey,
 } from 'crypto';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, rmSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, rmSync, statSync, renameSync } from 'fs';
 import Database from 'better-sqlite3';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const ENV_PATH = join(__dirname, '.env');
+const PACKAGE_DIR = __dirname;
+const CONFIG_PATH = resolve(process.env.CLAWCHAT_PROXY_CONFIG || join(homedir(), '.clawchat-proxy'));
+const CONFIG_DIR = dirname(CONFIG_PATH);
+const DATA_DIR = resolve(process.env.CLAWCHAT_PROXY_DATA_DIR || join(homedir(), '.clawchat-proxy-data'));
+const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
+const DEFAULT_PORT = '18888';
+const DEFAULT_GATEWAY_URL = 'ws://127.0.0.1:18789';
+const DEFAULT_DOWNLOAD_ROOT = join(homedir(), '.openclaw', 'workspace', 'sessions');
+
+function resolveConfigPath(rawPath) {
+  const trimmed = String(rawPath || '').trim();
+  if (!trimmed) return CONFIG_DIR;
+  if (trimmed === '~') return homedir();
+  const expanded = trimmed.startsWith('~/') || trimmed.startsWith('~\\')
+    ? join(homedir(), trimmed.slice(2))
+    : trimmed;
+  return isAbsolute(expanded) ? resolve(expanded) : resolve(CONFIG_DIR, expanded);
+}
 
 function parseDownloadPathMaps(raw) {
   return String(raw || '')
@@ -40,74 +60,226 @@ function parseDownloadPathMaps(raw) {
     .map((entry) => {
       const [from, to] = entry.split('=>').map((s) => s?.trim());
       if (!from || !to) return null;
-      return { from, to: resolve(__dirname, to) };
+      return { from, to: resolveConfigPath(to) };
     })
     .filter(Boolean);
 }
 
-// ==================== 自动创建 .env ====================
-if (!existsSync(ENV_PATH)) {
-  const tmpToken = randomBytes(12).toString('base64url');
-  const content = [
-    '# ClawChat 配置文件（自动生成）',
-    'PROXY_PORT=3210',
-    '',
-    '# 单用户模式：客户端连接密码',
-    `PROXY_TOKEN=${tmpToken}`,
-    '',
-    '# 多用户模式（每个用户独立对话，设备只需配对一次）',
-    '# 格式: 用户名:连接密码,用户名2:连接密码2',
-    '# PROXY_USERS=alice:tokenA,bob:tokenB',
-    '# 注意: 设置 PROXY_USERS 后，PROXY_TOKEN 仅作单用户兜底',
-    '',
-    '# OpenClaw Gateway 地址',
-    'OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789',
-    '',
-    '# OpenClaw Gateway 认证 token',
-    'OPENCLAW_GATEWAY_TOKEN=',
-    '',
-    '# OpenClaw Gateway 认证密码（优先于 token）',
-    'OPENCLAW_GATEWAY_PASSWORD=',
-    '',
-    '# 允许下载的构建产物目录（逗号分隔，支持相对 server/ 的路径）',
-    '# 例如: DOWNLOAD_ROOTS=../dist,../android/app/build/outputs,../release',
-    'DOWNLOAD_ROOTS=../dist,../android/app/build/outputs,../build,../out,../release',
-    '',
-    '# 可选：将智能体输出中的虚拟路径映射到本机真实路径',
-    '# 例如: DOWNLOAD_PATH_MAPS=/root/.openclaw/workspace=>../workspace',
-    'DOWNLOAD_PATH_MAPS=',
-    '',
-    '# 日志级别: error / warn / info / debug / trace',
-    '# trace 级别会打印与 Gateway 交互的所有完整 JSON 帧',
-    'LOG_LEVEL=info',
-    '',
-  ].join('\n');
-  writeFileSync(ENV_PATH, content, 'utf8');
-  console.log('[INFO] 首次启动，已自动创建 server/.env 配置文件');
-  console.log(`[INFO] 自动生成的连接密码: ${tmpToken}`);
+function loadOpenClawAuthPreset() {
+  const fallback = {
+    key: 'OPENCLAW_GATEWAY_TOKEN',
+    value: '',
+    source: '未找到 ~/.openclaw/openclaw.json，将手动配置 Gateway Token',
+  };
+
+  if (!existsSync(OPENCLAW_CONFIG_PATH)) return fallback;
+
+  try {
+    const parsed = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8'));
+    const auth = parsed?.gateway?.auth || {};
+    const mode = String(auth.mode || '').trim().toLowerCase();
+    const detectedValue = String(auth.token || auth.password || '').trim();
+
+    if (mode === 'token') {
+      return {
+        key: 'OPENCLAW_GATEWAY_TOKEN',
+        value: detectedValue,
+        source: `已从 ~/.openclaw/openclaw.json 检测到 gateway.auth.mode=token`,
+      };
+    }
+    if (mode === 'password') {
+      return {
+        key: 'OPENCLAW_GATEWAY_PASSWORD',
+        value: detectedValue,
+        source: `已从 ~/.openclaw/openclaw.json 检测到 gateway.auth.mode=password`,
+      };
+    }
+    return {
+      ...fallback,
+      source: 'openclaw.json 中未识别到 gateway.auth.mode，改为手动配置 Gateway Token',
+    };
+  } catch (error) {
+    return {
+      ...fallback,
+      source: `读取 ~/.openclaw/openclaw.json 失败：${error.message}`,
+    };
+  }
 }
 
-config({ path: ENV_PATH });
+async function promptWithDefault(rl, label, defaultValue = '') {
+  const suffix = defaultValue ? ` [${defaultValue}]` : '';
+  const answer = await rl.question(`${label}${suffix}: `);
+  const trimmed = answer.trim();
+  return trimmed || defaultValue;
+}
+
+function normalizePort(value) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535
+    ? String(parsed)
+    : DEFAULT_PORT;
+}
+
+function normalizeLogLevel(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['error', 'warn', 'info', 'debug', 'trace'].includes(normalized)
+    ? normalized
+    : 'info';
+}
+
+function buildConfigContent(values) {
+  const lines = [
+    '# ClawChat Proxy 配置文件（首次引导生成）',
+    `# 路径: ${CONFIG_PATH}`,
+    '',
+    '# 代理服务端口',
+    `PROXY_PORT=${values.port}`,
+    '',
+    '# OpenClaw Gateway 地址',
+    `OPENCLAW_GATEWAY_URL=${values.gatewayUrl}`,
+    '',
+    '# OpenClaw Gateway 认证 token',
+    `OPENCLAW_GATEWAY_TOKEN=${values.gatewayToken}`,
+    '',
+    '# OpenClaw Gateway 认证密码（优先于 token）',
+    `OPENCLAW_GATEWAY_PASSWORD=${values.gatewayPassword}`,
+    '',
+    '# 允许下载的目录白名单（逗号分隔，支持 ~/ 家目录）',
+    `DOWNLOAD_ROOTS=${values.downloadRoots}`,
+    '',
+    '# 多用户账号（格式: 用户名:密码,用户名2:密码2）',
+    '# 用户名不能包含 : ，密码不要包含逗号',
+    `PROXY_USERS=${values.proxyUsers}`,
+    '',
+    '# 可选：将智能体输出中的虚拟路径映射到本机真实路径',
+    '# 例如: DOWNLOAD_PATH_MAPS=/root/.openclaw/workspace=>~/workspace',
+    `DOWNLOAD_PATH_MAPS=${values.downloadPathMaps}`,
+    '',
+    '# 日志级别: error / warn / info / debug / trace',
+    `LOG_LEVEL=${values.logLevel}`,
+    '',
+    '# 允许的跨域来源（逗号分隔）；留空表示允许全部',
+    `ALLOWED_ORIGINS=${values.allowedOrigins}`,
+    '',
+  ];
+  return lines.join('\n');
+}
+
+async function runSetupWizard() {
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  const preset = loadOpenClawAuthPreset();
+  const rl = createInterface({ input, output, terminal: true });
+
+  try {
+    console.log('');
+    console.log('欢迎使用 ClawChat Proxy 初始化向导');
+    console.log(`配置文件将写入: ${CONFIG_PATH}`);
+    console.log(preset.source);
+    console.log('');
+
+    const port = normalizePort(await promptWithDefault(rl, 'PROXY_PORT', DEFAULT_PORT));
+    const gatewayUrl = await promptWithDefault(rl, 'OPENCLAW_GATEWAY_URL', DEFAULT_GATEWAY_URL);
+
+    let gatewayToken = '';
+    let gatewayPassword = '';
+    if (preset.key === 'OPENCLAW_GATEWAY_PASSWORD') {
+      gatewayPassword = await promptWithDefault(rl, 'OPENCLAW_GATEWAY_PASSWORD', preset.value);
+    } else {
+      gatewayToken = await promptWithDefault(rl, 'OPENCLAW_GATEWAY_TOKEN', preset.value);
+    }
+
+    const downloadRoots = await promptWithDefault(rl, 'DOWNLOAD_ROOTS', '~/.openclaw/workspace/sessions');
+
+    console.log('');
+    console.log('PROXY_USERS 配置说明:');
+    console.log('  格式: 用户名:密码,用户名2:密码2');
+    console.log('  示例: alice:password1,bob:password2');
+    const proxyUsers = await promptWithDefault(rl, 'PROXY_USERS', '');
+
+    const downloadPathMaps = await promptWithDefault(rl, 'DOWNLOAD_PATH_MAPS', '');
+    const logLevel = normalizeLogLevel(await promptWithDefault(rl, 'LOG_LEVEL', 'info'));
+    const allowedOrigins = await promptWithDefault(rl, 'ALLOWED_ORIGINS（留空表示允许全部）', '');
+
+    writeFileSync(CONFIG_PATH, buildConfigContent({
+      port,
+      gatewayUrl,
+      gatewayToken,
+      gatewayPassword,
+      downloadRoots,
+      proxyUsers,
+      downloadPathMaps,
+      logLevel,
+      allowedOrigins,
+    }), 'utf8');
+
+    console.log('');
+    console.log(`配置已写入: ${CONFIG_PATH}`);
+    console.log('后续可直接运行 `npx clawchat-proxy` 启动。');
+    console.log('');
+  } finally {
+    rl.close();
+  }
+}
+
+async function ensureConfigFile() {
+  const forceSetup = argv.includes('--setup') || argv.includes('--init');
+  if (existsSync(CONFIG_PATH) && !forceSetup) return;
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error(`配置文件不存在：${CONFIG_PATH}`);
+    console.error('请在交互终端中先运行一次 `npx clawchat-proxy --setup` 完成初始化。');
+    exit(1);
+  }
+
+  await runSetupWizard();
+}
+
+function migrateLegacyRuntimeData() {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const entries = [
+    ['.device-key.json', '.device-key.json'],
+    ['clawchat.db', 'clawchat.db'],
+    ['clawchat.db-shm', 'clawchat.db-shm'],
+    ['clawchat.db-wal', 'clawchat.db-wal'],
+    ['.session-titles.json', '.session-titles.json'],
+    ['uploads', 'uploads'],
+  ];
+
+  for (const [legacyName, targetName] of entries) {
+    const legacyPath = join(PACKAGE_DIR, legacyName);
+    const targetPath = join(DATA_DIR, targetName);
+    if (!existsSync(legacyPath) || existsSync(targetPath)) continue;
+    try {
+      renameSync(legacyPath, targetPath);
+      console.log(`[INFO] 已迁移运行时数据: ${legacyName} -> ${targetPath}`);
+    } catch (error) {
+      console.warn(`[WARN] 迁移运行时数据失败: ${legacyName} (${error.message})`);
+    }
+  }
+}
+
+await ensureConfigFile();
+config({ path: CONFIG_PATH, override: true });
+migrateLegacyRuntimeData();
 
 // ==================== 配置 ====================
 const CONFIG = {
-  port: parseInt(process.env.PROXY_PORT, 10) || 3210,
-  proxyToken: process.env.PROXY_TOKEN || '',
-  gatewayUrl: process.env.OPENCLAW_GATEWAY_URL || 'ws://127.0.0.1:18789',
+  port: parseInt(process.env.PROXY_PORT, 10) || 18888,
+  gatewayUrl: process.env.OPENCLAW_GATEWAY_URL || DEFAULT_GATEWAY_URL,
   gatewayToken: process.env.OPENCLAW_GATEWAY_TOKEN || '',
   gatewayPassword: process.env.OPENCLAW_GATEWAY_PASSWORD || '',
-  downloadRoots: (process.env.DOWNLOAD_ROOTS || '../dist,../android/app/build/outputs,../build,../out,../release')
+  downloadRoots: (process.env.DOWNLOAD_ROOTS || DEFAULT_DOWNLOAD_ROOT)
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
-    .map((p) => resolve(__dirname, p)),
+    .map((p) => resolveConfigPath(p)),
   downloadPathMaps: parseDownloadPathMaps(process.env.DOWNLOAD_PATH_MAPS),
-  distPath: join(__dirname, '..', 'dist'),
+  distPath: join(PACKAGE_DIR, '..', 'dist'),
 };
 const CLAWCHAT_FILES_RPC_PREFIX = 'clawchatfiles';
 
 // ==================== 多用户配置 ====================
-// 格式: PROXY_USERS=alice:tokenA,bob:tokenB
+// 格式: PROXY_USERS=alice:password1,bob:password2
 const USERS = new Map();
 (process.env.PROXY_USERS || '').split(',').map(s => s.trim()).filter(Boolean).forEach(entry => {
   const idx = entry.indexOf(':');
@@ -117,10 +289,8 @@ const USERS = new Map();
     if (userId && userToken) USERS.set(userId, userToken);
   }
 });
-const MULTI_USER = USERS.size > 0;
-
 // ==================== Ed25519 设备密钥（全局共享） ====================
-const DEVICE_KEY_PATH = join(__dirname, '.device-key.json');
+const DEVICE_KEY_PATH = join(DATA_DIR, '.device-key.json');
 const deviceKey = (() => {
   if (existsSync(DEVICE_KEY_PATH)) {
     return JSON.parse(readFileSync(DEVICE_KEY_PATH, 'utf8'));
@@ -138,7 +308,7 @@ const deviceKey = (() => {
 const devicePrivateKey = createPrivateKey(deviceKey.privateKeyPem);
 
 // ==================== SQLite 持久化 ====================
-const DB_PATH = join(__dirname, 'clawchat.db');
+const DB_PATH = join(DATA_DIR, 'clawchat.db');
 const sqlite = new Database(DB_PATH);
 sqlite.pragma('journal_mode = WAL'); // 高并发性能
 
@@ -152,7 +322,7 @@ sqlite.exec(`
 `);
 
 // 如果旧的 JSON 文件存在，自动迁移数据
-const OLD_TITLES_PATH = join(__dirname, '.session-titles.json');
+const OLD_TITLES_PATH = join(DATA_DIR, '.session-titles.json');
 if (existsSync(OLD_TITLES_PATH)) {
   try {
     const oldData = JSON.parse(readFileSync(OLD_TITLES_PATH, 'utf8'));
@@ -170,7 +340,7 @@ if (existsSync(OLD_TITLES_PATH)) {
 }
 
 // ====== 附件存储 ======
-const UPLOADS_DIR = join(__dirname, 'uploads');
+const UPLOADS_DIR = join(DATA_DIR, 'uploads');
 if (!existsSync(UPLOADS_DIR)) mkdirSync(UPLOADS_DIR, { recursive: true });
 
 sqlite.exec(`
@@ -369,16 +539,14 @@ function broadcastSSE(event, data) {
 // ==================== 认证 ====================
 
 function validateToken(token, username) {
-  if (MULTI_USER) {
-    for (const [userId, userToken] of USERS) {
-      if (token === userToken) return { valid: true, userId };
-    }
-    return { valid: false, userId: null };
-  }
-  // 单用户模式：token 匹配即可，username 作为显示名
-  if (!CONFIG.proxyToken) return { valid: true, userId: username || null };
-  if (token === CONFIG.proxyToken) return { valid: true, userId: username || null };
-  return { valid: false, userId: null };
+  const normalizedUser = String(username || '').trim();
+  const normalizedToken = String(token || '').trim();
+  if (!normalizedUser || !normalizedToken) return { valid: false, userId: null };
+  const expectedToken = USERS.get(normalizedUser);
+  if (!expectedToken) return { valid: false, userId: null };
+  return expectedToken === normalizedToken
+    ? { valid: true, userId: normalizedUser }
+    : { valid: false, userId: null };
 }
 
 function extractBearerToken(req) {
@@ -391,8 +559,9 @@ function extractBearerToken(req) {
 
 function authenticateByToken(req) {
   const token = extractBearerToken(req);
-  if (!token) return { valid: false, userId: null };
-  return validateToken(token, null);
+  const username = String(req.headers['x-proxy-user'] || '').trim();
+  if (!token || !username) return { valid: false, userId: null };
+  return validateToken(token, username);
 }
 
 function isPathWithinRoot(targetPath, rootPath) {
@@ -995,23 +1164,17 @@ app.use(express.json({ limit: '50mb' }));
 
 // CORS
 app.use((req, res, next) => {
-  const extraOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-  const allowedOrigins = [
-    'http://localhost:5173', 'http://127.0.0.1:5173',
-    'https://localhost', 'https://127.0.0.1',
-    `http://localhost:${CONFIG.port}`, `http://127.0.0.1:${CONFIG.port}`,
-    'capacitor://localhost', 'ionic://localhost',
-    'http://localhost',
-    ...extraOrigins,
-  ];
+  const configuredOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+  const allowAllOrigins = configuredOrigins.length === 0 || configuredOrigins.includes('*');
   const origin = req.headers.origin;
-  if (origin && (allowedOrigins.includes(origin) || origin.startsWith('capacitor://') || origin.startsWith('ionic://'))) {
+  if (origin && (allowAllOrigins || configuredOrigins.includes(origin) || origin.startsWith('capacitor://') || origin.startsWith('ionic://'))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
   } else if (!origin) {
     res.setHeader('Access-Control-Allow-Origin', '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Proxy-User');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -1027,10 +1190,13 @@ app.get('/health', (req, res) => {
     config: {
       port: CONFIG.port,
       gatewayUrl: CONFIG.gatewayUrl,
-      hasProxyToken: !!CONFIG.proxyToken,
       hasGatewayToken: !!CONFIG.gatewayToken,
-      multiUser: MULTI_USER,
+      multiUser: true,
       userCount: USERS.size,
+      downloadRoots: CONFIG.downloadRoots,
+      configPath: CONFIG_PATH,
+      dataDir: DATA_DIR,
+      allowAllOrigins: !(process.env.ALLOWED_ORIGINS || '').trim(),
     },
   });
 });
@@ -1042,13 +1208,13 @@ app.post('/api/connect', async (req, res) => {
   const { token, username } = req.body || {};
   const auth = validateToken(token, username);
   if (!auth.valid) {
-    return res.status(401).json({ ok: false, error: '认证失败：无效的连接密码' });
+    return res.status(401).json({ ok: false, error: '认证失败：用户名或用户密码错误' });
   }
 
   if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword && !deviceKey.deviceToken) {
     return res.status(502).json({
       ok: false,
-      error: 'Gateway 认证未配置：请在服务器的 server/.env 中设置 OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_GATEWAY_PASSWORD',
+      error: `Gateway 认证未配置：请在 ${CONFIG_PATH} 中设置 OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_GATEWAY_PASSWORD`,
     });
   }
 
@@ -1099,7 +1265,7 @@ app.post('/api/connect', async (req, res) => {
     } else if (/连接超时/.test(userError)) {
       userError = '连接超时，请检查 OpenClaw 是否正在运行';
     } else if (/unauthorized|token missing|auth.*token|握手失败/i.test(userError)) {
-      userError = 'Gateway 认证失败：请在服务器的 server/.env 中配置 OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_GATEWAY_PASSWORD';
+      userError = `Gateway 认证失败：请在 ${CONFIG_PATH} 中配置 OPENCLAW_GATEWAY_TOKEN 或 OPENCLAW_GATEWAY_PASSWORD`;
     }
     res.status(statusCode).json({ ok: false, error: userError });
   }
@@ -1394,7 +1560,7 @@ app.get('/api/attachment/:id', (req, res) => {
 app.post('/api/download-file', (req, res) => {
   const auth = authenticateByToken(req);
   if (!auth.valid) {
-    return res.status(401).json({ ok: false, error: '认证失败：无效的连接密码' });
+    return res.status(401).json({ ok: false, error: '认证失败：用户名或用户密码错误' });
   }
 
   const requestedPath = String(req.body?.path || '').trim();
@@ -1483,16 +1649,10 @@ server.listen(CONFIG.port, () => {
   console.log(`║  端口:         ${String(CONFIG.port).padEnd(40)}║`);
   console.log(`║  绑定地址:     0.0.0.0（公网可访问）                  ║`);
   console.log(`║  Gateway 地址: ${CONFIG.gatewayUrl.padEnd(40)}║`);
-  if (MULTI_USER) {
-    console.log(`║  用户模式:     多用户（${USERS.size} 个用户，对话隔离）${' '.repeat(Math.max(0, 15 - String(USERS.size).length))}║`);
-    for (const [uid] of USERS) {
-      const line = `    - ${uid}`;
-      console.log(`║  ${line.padEnd(53)}║`);
-    }
-  } else if (CONFIG.proxyToken) {
-    console.log(`║  连接 Token:   ${CONFIG.proxyToken.padEnd(40)}║`);
-  } else {
-    console.log('║  连接 Token:   (未设置, 任何人可连接)                ║');
+  console.log(`║  用户模式:     多用户（${USERS.size} 个用户，对话隔离）${' '.repeat(Math.max(0, 15 - String(USERS.size).length))}║`);
+  for (const [uid] of USERS) {
+    const line = `    - ${uid}`;
+    console.log(`║  ${line.padEnd(53)}║`);
   }
   if (CONFIG.gatewayToken || CONFIG.gatewayPassword) {
     console.log('║  Gateway 认证: ✅ 已配置                             ║');
@@ -1510,27 +1670,28 @@ server.listen(CONFIG.port, () => {
   console.log('╚════════════════════════════════════════════════════════╝');
   console.log('');
 
-  if (MULTI_USER) {
-    console.log(`ℹ️  多用户模式已启用，共 ${USERS.size} 个用户`);
-    console.log('   每个用户拥有独立的对话空间，共享同一个 Gateway 设备身份');
-    console.log('   Gateway 只需配对一次，所有用户即可使用');
-    console.log('');
-  }
+  console.log(`ℹ️  多用户模式已启用，共 ${USERS.size} 个用户`);
+  console.log('   每个用户拥有独立的对话空间，共享同一个 Gateway 设备身份');
+  console.log('   Gateway 只需配对一次，所有用户即可使用');
+  console.log(`   配置文件: ${CONFIG_PATH}`);
+  console.log(`   运行数据目录: ${DATA_DIR}`);
+  console.log(`   默认下载目录白名单: ${DEFAULT_DOWNLOAD_ROOT}`);
+  console.log('');
 
   if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword && !deviceKey.deviceToken) {
     console.log('⚠️  警告: 未配置 Gateway 认证信息！');
-    console.log('   请编辑 server/.env 文件，设置以下其中一项：');
+    console.log(`   请编辑 ${CONFIG_PATH}，设置以下其中一项：`);
     console.log('     OPENCLAW_GATEWAY_TOKEN=你的Gateway-Token');
     console.log('     OPENCLAW_GATEWAY_PASSWORD=你的Gateway密码');
     console.log('');
   } else if (!CONFIG.gatewayToken && !CONFIG.gatewayPassword && deviceKey.deviceToken) {
     console.log('ℹ️  使用已保存的 deviceToken 进行 Gateway 认证');
-    console.log('   （如需切换 Gateway，请删除 server/.device-key.json 并重新配对）');
+    console.log(`   （如需切换 Gateway，请删除 ${DEVICE_KEY_PATH} 并重新配对）`);
     console.log('');
   }
 
-  if (!MULTI_USER && !CONFIG.proxyToken) {
-    log.warn('未设置连接密码 (PROXY_TOKEN)，所有客户端连接将被允许');
+  if (USERS.size === 0) {
+    log.warn(`未设置任何用户，请编辑 ${CONFIG_PATH} 中的 PROXY_USERS=用户名:密码`);
   }
 });
 

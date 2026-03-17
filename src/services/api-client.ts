@@ -1,6 +1,5 @@
 /**
  * SSE + HTTP POST 客户端 - 对接 ClawChat 代理服务端
- * 兼容 qingchencloud/clawapp 协议
  *
  * 架构：手机 ←SSE+POST→ 代理服务端 ←WS→ OpenClaw Gateway
  */
@@ -122,18 +121,17 @@ export class ApiClient {
   }
 
   /** 连接到代理服务端 */
-  async connect(host: string, token: string, username?: string): Promise<void> {
+  async connect(host: string, token: string, username: string): Promise<void> {
     this._host = host;
     this._token = token;
-    this._username = username || '';
+    this._username = username;
     this._baseUrl = resolveBaseUrl(host);
     this._intentionalClose = false;
     this._setConnected(false, 'connecting');
 
     try {
       // 1. POST /api/connect 建立会话
-      const body: Record<string, string> = { token };
-      if (username) body.username = username;
+      const body: Record<string, string> = { token, username };
       const res = await fetch(`${this._baseUrl}/api/connect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -198,7 +196,7 @@ export class ApiClient {
       this._readyCallbacks.forEach((fn) => {
         try {
           fn(this._hello, this._sessionKey);
-        } catch (_e) {
+        } catch {
           /* ignore */
         }
       });
@@ -348,14 +346,14 @@ export class ApiClient {
 
   /** 手动触发重连 */
   reconnect(): void {
-    if (!this._host || !this._token) return;
+    if (!this._host || !this._token || !this._username) return;
     this._intentionalClose = false;
     this._reconnectAttempts = 0;
     this._clearReconnectTimer();
     this._closeEventSource();
     this._sid = null;
     this._gatewayReady = false;
-    this.connect(this._host, this._token, this._username || undefined);
+    this.connect(this._host, this._token, this._username);
   }
 
   private _waitReady(timeoutMs = 15000): Promise<{ hello: unknown; sessionKey: string | null }> {
@@ -378,7 +376,7 @@ export class ApiClient {
 
   private _recoverSession(): Promise<void> {
     if (this._sessionRecoverPromise) return this._sessionRecoverPromise;
-    if (!this._host || !this._token) return Promise.reject(new Error('未连接'));
+    if (!this._host || !this._token || !this._username) return Promise.reject(new Error('未连接'));
 
     this._sessionRecoverPromise = (async () => {
       this.reconnect();
@@ -596,6 +594,7 @@ export class ApiClient {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this._token}`,
+        'X-Proxy-User': this._username,
       },
       body: JSON.stringify({ path }),
     });
@@ -701,7 +700,7 @@ export class ApiClient {
     this._readyCallbacks.forEach((fn) => {
       try {
         fn(null, null, { error: true, message: msg });
-      } catch (_e) {
+      } catch {
         /* ignore */
       }
     });
@@ -748,7 +747,7 @@ export class ApiClient {
         : Math.min(1000 * Math.pow(2, this._reconnectAttempts - 2), MAX_RECONNECT_DELAY);
     this._reconnectAttempts++;
     this._setConnected(false, 'reconnecting');
-    this._reconnectTimer = setTimeout(() => this.connect(this._host, this._token, this._username || undefined), delay);
+    this._reconnectTimer = setTimeout(() => this.connect(this._host, this._token, this._username), delay);
   }
 }
 

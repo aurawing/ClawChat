@@ -9,14 +9,14 @@ export default defineConfig({
     host: true,
     proxy: {
       '/ws': {
-        target: 'ws://localhost:3210',
+        target: 'ws://localhost:18888',
         ws: true,
       },
       '/upload': {
-        target: 'http://localhost:3210',
+        target: 'http://localhost:18888',
       },
       '/health': {
-        target: 'http://localhost:3210',
+        target: 'http://localhost:18888',
       },
     },
   },

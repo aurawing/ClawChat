@@ -4,6 +4,9 @@
   "description": "ClawChat SSE+POST 代理服务端 - 兼容 ClawApp 协议",
   "type": "module",
   "main": "index.js",
+  "bin": {
+    "clawchat-proxy": "./index.js"
+  },
   "scripts": {
     "start": "node index.js",
     "dev": "node --watch index.js"
