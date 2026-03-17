@@ -1578,7 +1578,6 @@ app.post('/api/send', async (req, res) => {
         ? `${originalMessage}\n\n${docContext}`
         : docContext;
       params.message = mergedMessage;
-      params.content = mergedMessage;
     }
   }
 
