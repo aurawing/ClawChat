@@ -74,7 +74,7 @@ cd ..
 **首次启动会进入引导，并在用户目录下生成配置目录 `~/.clawchat-proxy/`，其中配置文件位于 `~/.clawchat-proxy/.clawchat-proxy`。**
 
 ```bash
-npx clawchat-proxy
+npx @claw_chat/clawchat-proxy
 ```
 
 首次启动时你会看到：
@@ -85,7 +85,7 @@ npx clawchat-proxy
 配置已写入: ~/.clawchat-proxy/.clawchat-proxy
 ```
 
-填写好 `PROXY_USERS` 后，在 App 登录时输入对应的用户名和密码即可。后续直接运行 `npx clawchat-proxy` 即可启动。
+填写好 `PROXY_USERS` 后，在 App 登录时输入对应的用户名和密码即可。后续直接运行 `npx @claw_chat/clawchat-proxy` 即可启动。
 
 ### 2.1 本地验证 `npm link`
 
@@ -102,7 +102,7 @@ clawchat-proxy
 
 ```bash
 cd server
-npm unlink -g clawchat-proxy
+npm unlink -g @claw_chat/clawchat-proxy
 ```
 
 ### 3. 配置（可选）
@@ -174,7 +174,7 @@ npm run dev
 npm run build
 
 # 启动代理服务（同时托管前端静态文件）
-npx clawchat-proxy
+npx @claw_chat/clawchat-proxy
 ```
 
 访问 `http://你的服务器IP:18888` 即可使用。
@@ -414,7 +414,7 @@ ClawChat/
 ### Q: 连接失败怎么办？
 
 1. 确认 OpenClaw Gateway 已启动（默认端口 18789）
-2. 确认代理服务已启动（`npx clawchat-proxy`）
+2. 确认代理服务已启动（`npx @claw_chat/clawchat-proxy`）
 3. 查看代理服务控制台的错误日志
 4. 检查 `~/.clawchat-proxy/.clawchat-proxy` 中的 Gateway 地址和认证信息是否正确
 5. 检查 App 中填写的服务器地址、用户名和密码是否与 `~/.clawchat-proxy/.clawchat-proxy` 中的 `PROXY_USERS` 一致

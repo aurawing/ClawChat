@@ -289,7 +289,7 @@ async function runSetupWizard() {
 
     console.log('');
     console.log(`配置已写入: ${CONFIG_PATH}`);
-    console.log('后续可直接运行 `npx clawchat-proxy` 启动。');
+    console.log('后续可直接运行 `npx @claw_chat/clawchat-proxy` 启动。');
     console.log('');
   } finally {
     rl.close();
@@ -302,7 +302,7 @@ async function ensureConfigFile() {
 
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error(`配置文件不存在：${CONFIG_PATH}`);
-    console.error('请在交互终端中先运行一次 `npx clawchat-proxy --setup` 完成初始化。');
+    console.error('请在交互终端中先运行一次 `npx @claw_chat/clawchat-proxy --setup` 完成初始化。');
     exit(1);
   }
 

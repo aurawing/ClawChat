@@ -1,11 +1,14 @@
 {
-  "name": "clawchat-proxy",
+  "name": "@claw_chat/clawchat-proxy",
   "version": "1.0.0",
   "description": "ClawChat SSE+POST 代理服务端 - 兼容 ClawApp 协议",
   "type": "module",
   "main": "index.js",
   "bin": {
     "clawchat-proxy": "./index.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "start": "node index.js",

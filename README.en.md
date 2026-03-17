@@ -39,7 +39,7 @@ cd ..
 ### 2. Start the proxy server
 
 ```bash
-npx clawchat-proxy
+npx @claw_chat/clawchat-proxy
 ```
 
 On first launch, the CLI wizard creates the `~/.clawchat-proxy/` directory, with the config file stored at `~/.clawchat-proxy/.clawchat-proxy`.
@@ -59,7 +59,7 @@ To remove the global link later:
 
 ```bash
 cd server
-npm unlink -g clawchat-proxy
+npm unlink -g @claw_chat/clawchat-proxy
 ```
 
 ### 3. Configure `~/.clawchat-proxy/.clawchat-proxy`
@@ -93,7 +93,7 @@ Production:
 
 ```bash
 npm run build
-npx clawchat-proxy
+npx @claw_chat/clawchat-proxy
 ```
 
 ## Downloading Generated Files
