@@ -488,7 +488,7 @@ export default function ChatPage() {
   } = useChatStore();
 
   const { theme, toggleTheme } = useTheme();
-  const { appName } = useLocale();
+  const { appName, t, locale } = useLocale();
   const [showSidebar, setShowSidebar] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHistoryDetail, setShowHistoryDetail] = useState(false);
@@ -496,7 +496,7 @@ export default function ChatPage() {
   const [historyDetailLoading, setHistoryDetailLoading] = useState(false);
   const [historyDetailError, setHistoryDetailError] = useState<string | null>(null);
   const [showFileBrowser, setShowFileBrowser] = useState(false);
-  const [fileBrowserRootName, setFileBrowserRootName] = useState('文件');
+  const [fileBrowserRootName, setFileBrowserRootName] = useState('');
   const [fileBrowserPath, setFileBrowserPath] = useState('');
   const [fileBrowserParentPath, setFileBrowserParentPath] = useState<string | null>(null);
   const [fileBrowserEntries, setFileBrowserEntries] = useState<FileBrowserEntry[]>([]);
@@ -573,7 +573,7 @@ export default function ChatPage() {
       })
       .catch((e) => {
         if (cancelled) return;
-        setHistoryDetailError((e as Error).message || '加载历史详情失败');
+        setHistoryDetailError((e as Error).message || t('loadingHistoryDetails'));
       })
       .finally(() => {
         if (!cancelled) setHistoryDetailLoading(false);
@@ -587,6 +587,8 @@ export default function ChatPage() {
   useEffect(() => {
     if (!showFileBrowser || !apiClient.gatewayReady || !currentSessionKey) return;
     let cancelled = false;
+    const fallbackRootName = locale === 'zh-CN' ? '文件' : 'Files';
+    const fallbackLoadingError = locale === 'zh-CN' ? '加载文件失败' : 'Failed to load files';
 
     setFileBrowserLoading(true);
     setFileBrowserError(null);
@@ -594,13 +596,13 @@ export default function ChatPage() {
     apiClient.listFiles(currentSessionKey, fileBrowserPath)
       .then((result) => {
         if (cancelled) return;
-        setFileBrowserRootName(result.rootName);
+        setFileBrowserRootName(result.rootName || fallbackRootName);
         setFileBrowserPath(result.currentPath);
         setFileBrowserParentPath(result.parentPath);
         setFileBrowserEntries(result.entries);
       })
       .catch((e) => {
-        if (!cancelled) setFileBrowserError((e as Error).message || '加载文件失败');
+        if (!cancelled) setFileBrowserError((e as Error).message || fallbackLoadingError);
       })
       .finally(() => {
         if (!cancelled) setFileBrowserLoading(false);
@@ -609,7 +611,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [showFileBrowser, fileBrowserPath, currentSessionKey]);
+  }, [showFileBrowser, fileBrowserPath, currentSessionKey, locale]);
 
   const handleSend = useCallback(
     (content: string, attachments?: FileAttachment[]) => {
@@ -683,7 +685,12 @@ export default function ChatPage() {
   const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiThinking;
 
   const currentSession = sessions.find((s) => s.key === currentSessionKey);
-  const currentTitle = currentSession?.title || (currentSessionKey ? extractTitle(currentSessionKey) : appName);
+  const currentTitleRaw = currentSession?.title || (currentSessionKey ? extractTitle(currentSessionKey) : appName);
+  const currentTitle = currentTitleRaw === '主对话'
+    ? t('mainSessionTitle')
+    : currentTitleRaw === '新对话'
+    ? t('newSessionTitle')
+    : currentTitleRaw;
 
   return (
     <div className="h-screen flex bg-th-base">
@@ -754,10 +761,10 @@ export default function ChatPage() {
               />
               <span className="text-xs text-th-text-dim">
                 {connectionStatus === 'ready' || connectionStatus === 'connected'
-                  ? (username ? `${username} · 已连接` : '已连接')
+                  ? (username ? `${username} · ${t('connectedStatus')}` : t('connectedStatus'))
                   : connectionStatus === 'connecting' || connectionStatus === 'reconnecting'
-                  ? '连接中...'
-                  : '未连接'}
+                  ? t('connectingStatus')
+                  : t('disconnectedStatus')}
               </span>
             </div>
           </div>
@@ -768,7 +775,7 @@ export default function ChatPage() {
             <button
               onClick={createNewSession}
               className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-emerald-400"
-              title="新建对话"
+              title={t('newConversationAction')}
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -777,7 +784,7 @@ export default function ChatPage() {
             <button
               onClick={() => setShowHistoryDetail(true)}
               className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
-              title="历史详情"
+              title={t('historyDetailsAction')}
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5.25a6.75 6.75 0 106.75 6.75A6.758 6.758 0 0012 5.25Z" />
@@ -787,14 +794,14 @@ export default function ChatPage() {
             <button
               onClick={() => {
                 if (!currentSessionKey) {
-                  alert('当前没有可用会话');
+                  alert(t('noActiveSessionError'));
                   return;
                 }
                 setFileBrowserPath('');
                 setShowFileBrowser(true);
               }}
               className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
-              title="文件浏览"
+              title={t('fileBrowserAction')}
             >
               <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
@@ -871,7 +878,7 @@ export default function ChatPage() {
           onDownload={async (path, options) => {
             try {
               setDownloadingBrowserPath(path);
-              if (!currentSessionKey) throw new Error('当前没有可用会话');
+              if (!currentSessionKey) throw new Error(t('noActiveSessionError'));
               const fileName = inferDownloadFileName(path, options);
               const savedLocation = Capacitor.isNativePlatform()
                 ? await saveNativeDownloadedFile(
@@ -883,10 +890,10 @@ export default function ChatPage() {
                     return saveDownloadedFile(blob, serverFileName);
                   })();
               if (savedLocation) {
-                alert(`已保存到 Documents/${APP_DOWNLOAD_SUBDIR}\n\n${savedLocation}`);
+                alert(`${t('savedToDocuments')} Documents/${APP_DOWNLOAD_SUBDIR}\n\n${savedLocation}`);
               }
             } catch (e) {
-              alert((e as Error).message || '下载失败');
+              alert((e as Error).message || t('downloadFailed'));
             } finally {
               setDownloadingBrowserPath(null);
             }
@@ -914,14 +921,34 @@ function SettingsModal({
   const [token, setToken] = useState(currentConfig?.token || '');
   const [username, setUsername] = useState(currentConfig?.username || '');
   const [showToken, setShowToken] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   const handleSave = () => {
-    if (!host.trim() || !username.trim() || !token.trim()) return;
+    const trimmedHost = host.trim();
+    const trimmedUsername = username.trim();
+    const trimmedToken = token.trim();
+    if (!trimmedHost) {
+      setValidationError(t('validationHostRequired'));
+      return;
+    }
+    if (!/^https?:\/\//i.test(trimmedHost)) {
+      setValidationError(t('validationHostProtocol'));
+      return;
+    }
+    if (!trimmedUsername) {
+      setValidationError(t('validationUsernameRequired'));
+      return;
+    }
+    if (!trimmedToken) {
+      setValidationError(t('validationPasswordRequired'));
+      return;
+    }
     const config: ServerConfig = {
-      host: host.trim().replace(/\/+$/, ''),
-      token: token.trim(),
-      username: username.trim(),
+      host: trimmedHost.replace(/\/+$/, ''),
+      token: trimmedToken,
+      username: trimmedUsername,
     };
+    setValidationError(null);
     localStorage.setItem('clawchat-config', JSON.stringify(config));
     onSave(config);
   };
@@ -965,37 +992,46 @@ function SettingsModal({
           </div>
 
           <div>
-            <label className="block text-sm text-th-text-muted mb-1.5">服务器地址</label>
+            <label className="block text-sm text-th-text-muted mb-1.5">{t('serverAddressLabel')}</label>
             <input
               type="text"
               value={host}
-              onChange={(e) => setHost(e.target.value)}
+              onChange={(e) => {
+                setHost(e.target.value);
+                if (validationError) setValidationError(null);
+              }}
               placeholder="http://example.com:18888"
               className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
             />
-            <p className="text-xs text-th-text-faint mt-1">请输入完整地址，包含 `http://` 或 `https://`</p>
+            <p className="text-xs text-th-text-faint mt-1">{t('serverAddressHint')}</p>
           </div>
 
           <div>
-            <label className="block text-sm text-th-text-muted mb-1.5">用户名</label>
+            <label className="block text-sm text-th-text-muted mb-1.5">{t('usernameLabel')}</label>
             <input
               type="text"
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="~/.clawchat-proxy 中的用户名"
+              onChange={(e) => {
+                setUsername(e.target.value);
+                if (validationError) setValidationError(null);
+              }}
+              placeholder={t('usernamePlaceholder')}
               className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
             />
-            <p className="text-xs text-th-text-faint mt-1">需与 `~/.clawchat-proxy` 中 `PROXY_USERS` 配置的用户名一致</p>
+            <p className="text-xs text-th-text-faint mt-1">{t('usernameHint')}</p>
           </div>
 
           <div>
-            <label className="block text-sm text-th-text-muted mb-1.5">用户密码</label>
+            <label className="block text-sm text-th-text-muted mb-1.5">{t('userPasswordLabel')}</label>
             <div className="relative">
               <input
                 type={showToken ? 'text' : 'password'}
                 value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="对应用户名的密码"
+                onChange={(e) => {
+                  setToken(e.target.value);
+                  if (validationError) setValidationError(null);
+                }}
+                placeholder={t('userPasswordPlaceholder')}
                 className="w-full bg-th-input border border-th-border rounded-xl px-4 py-2.5 pr-11 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors"
               />
               <button
@@ -1016,6 +1052,12 @@ function SettingsModal({
             </div>
           </div>
 
+          {validationError && (
+            <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs text-red-300">
+              {validationError}
+            </div>
+          )}
+
         </div>
 
         {/* 操作按钮 */}
@@ -1024,14 +1066,13 @@ function SettingsModal({
             onClick={onClose}
             className="flex-1 py-2.5 rounded-xl border border-th-border text-th-text-secondary text-sm hover:bg-th-elevated transition-colors"
           >
-            取消
+            {t('cancelAction')}
           </button>
           <button
             onClick={handleSave}
-            disabled={!host.trim() || !username.trim() || !token.trim()}
             className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-neutral-700 disabled:to-neutral-700 text-white text-sm font-medium transition-all disabled:cursor-not-allowed"
           >
-            保存并重连
+            {t('saveReconnectAction')}
           </button>
         </div>
       </div>
@@ -1065,6 +1106,7 @@ function extractTitle(key: string): string {
 
 /** 中止后操作按钮 */
 function AbortedActions({ onResend, onDelete }: { onResend: () => void; onDelete: () => void }) {
+  const { t } = useLocale();
   return (
     <div className="flex justify-center gap-3 my-3 animate-fadeIn">
       <button
@@ -1074,7 +1116,7 @@ function AbortedActions({ onResend, onDelete }: { onResend: () => void; onDelete
         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
         </svg>
-        重新发送
+        {t('resendAction')}
       </button>
       <button
         onClick={onDelete}
@@ -1083,7 +1125,7 @@ function AbortedActions({ onResend, onDelete }: { onResend: () => void; onDelete
         <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
         </svg>
-        删除消息
+        {t('deleteMessageAction')}
       </button>
     </div>
   );
@@ -1091,6 +1133,7 @@ function AbortedActions({ onResend, onDelete }: { onResend: () => void; onDelete
 
 /** AI 思考中占位符 */
 function ThinkingPlaceholder() {
+  const { t } = useLocale();
   return (
     <div className="flex justify-start mb-4">
       <div className="w-7 h-7 rounded-full mr-2 mt-1 shrink-0 overflow-hidden">
@@ -1098,7 +1141,7 @@ function ThinkingPlaceholder() {
       </div>
       <div className="bg-th-elevated/60 rounded-2xl rounded-tl-md px-4 py-3 min-w-[150px]">
         <div className="flex items-center gap-2 text-sm text-th-text-muted">
-          <span>正在思考</span>
+          <span>{t('thinkingLabel')}</span>
         </div>
         <div className="mt-2 flex items-center gap-1.5">
           <span className="cc-thinking-dot" style={{ animationDelay: '0ms' }} />
@@ -1123,13 +1166,14 @@ function HistoryDetailModal({
   error: string | null;
   onClose: () => void;
 }) {
+  const { t } = useLocale();
   return (
     <div className="fixed inset-0 z-50 bg-th-base flex flex-col safe-area-bottom">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-th-border-subtle bg-th-base/95 backdrop-blur-sm safe-area-top">
         <button
           onClick={onClose}
           className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
-          title="关闭"
+          title={t('closeAction')}
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -1137,17 +1181,17 @@ function HistoryDetailModal({
         </button>
         <div className="min-w-0">
           <h2 className="text-sm font-medium text-th-text truncate">{title}</h2>
-          <p className="text-xs text-th-text-dim">历史详情（仅来自 chat.history）</p>
+          <p className="text-xs text-th-text-dim">{t('historyDetailSubtitle')}</p>
         </div>
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {loading ? (
-          <div className="text-sm text-th-text-muted">正在加载历史详情...</div>
+          <div className="text-sm text-th-text-muted">{t('loadingHistoryDetails')}</div>
         ) : error ? (
           <div className="text-sm text-red-400">{error}</div>
         ) : messages.length === 0 ? (
-          <div className="text-sm text-th-text-muted">历史记录为空</div>
+          <div className="text-sm text-th-text-muted">{t('historyEmpty')}</div>
         ) : (
           messages.map((msg) => <MessageBubble key={`detail-${msg.id}`} message={msg} />)
         )}
@@ -1179,13 +1223,14 @@ function FileBrowserModal({
   onNavigate: (path: string) => void;
   onDownload: (path: string, options?: { archive?: boolean }) => void | Promise<void>;
 }) {
+  const { t, locale } = useLocale();
   return (
     <div className="fixed inset-0 z-50 bg-th-base flex flex-col safe-area-bottom">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-th-border-subtle bg-th-base/95 backdrop-blur-sm safe-area-top">
         <button
           onClick={onClose}
           className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
-          title="关闭"
+          title={t('closeAction')}
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -1200,14 +1245,14 @@ function FileBrowserModal({
             onClick={() => onDownload(currentPath, { archive: true })}
             className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
           >
-            打包下载
+            {t('archiveDownloadAction')}
           </button>
         {parentPath !== null && (
           <button
             onClick={() => onNavigate(parentPath)}
             className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
           >
-            返回上级
+            {t('goParentAction')}
           </button>
         )}
         </div>
@@ -1215,17 +1260,17 @@ function FileBrowserModal({
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {loading ? (
-          <div className="text-sm text-th-text-muted">正在加载文件...</div>
+          <div className="text-sm text-th-text-muted">{t('loadingFiles')}</div>
         ) : error ? (
           <div className="text-sm text-red-400">{error}</div>
         ) : entries.length === 0 ? (
-          <div className="text-sm text-th-text-muted">当前目录为空</div>
+          <div className="text-sm text-th-text-muted">{t('emptyDirectory')}</div>
         ) : (
           <div className="space-y-2">
             <div className="text-[11px] text-th-text-dim px-1">
               {Capacitor.isNativePlatform()
-                ? `下载文件会保存到 Documents/${APP_DOWNLOAD_SUBDIR}`
-                : '下载文件会弹出另存为窗口；若浏览器不支持，则回退到默认下载目录'}
+                ? `${t('nativeDownloadHintPrefix')} Documents/${APP_DOWNLOAD_SUBDIR}`
+                : t('browserDownloadHint')}
             </div>
             {entries.map((entry) => (
               <div
@@ -1249,19 +1294,19 @@ function FileBrowserModal({
                 >
                   <div className="text-sm text-th-text truncate">{entry.name}</div>
                   <div className="text-[11px] text-th-text-dim">
-                    {entry.isDirectory ? '文件夹' : `${(entry.size / 1024).toFixed(entry.size > 1024 ? 1 : 0)} KB`} · {new Date(entry.modifiedAt).toLocaleString('zh-CN')}
+                    {entry.isDirectory ? t('folderLabel') : `${(entry.size / 1024).toFixed(entry.size > 1024 ? 1 : 0)} KB`} · {new Date(entry.modifiedAt).toLocaleString(locale)}
                   </div>
                 </button>
                 {entry.isDirectory ? (
                   <button
                     onClick={() => onDownload(entry.path, { archive: true })}
                     className="shrink-0 text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
-                    title="打包下载目录"
+                    title={t('archiveDownloadAction')}
                   >
-                    {downloadingPath === entry.path ? '打包中...' : '打包下载'}
+                    {downloadingPath === entry.path ? t('archivingAction') : t('archiveDownloadAction')}
                   </button>
                 ) : downloadingPath === entry.path ? (
-                  <span className="text-xs text-emerald-300 shrink-0">下载中...</span>
+                  <span className="text-xs text-emerald-300 shrink-0">{t('downloadingAction')}</span>
                 ) : null}
               </div>
             ))}

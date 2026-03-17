@@ -264,6 +264,32 @@ function generateSessionTitle(content: string): string {
   return firstLine.length > 30 ? firstLine.substring(0, 30) + '…' : firstLine;
 }
 
+function extractAssistantTitleCandidate(content: string): string | null {
+  const normalized = content
+    .replace(/[`*_#>\-\[\]]/g, ' ')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!normalized) return null;
+
+  const firstClause = normalized
+    .replace(/^(当然|好的|没问题|可以|下面|以下|这是|我们来|让我来|我来|先来|总结一下|概括一下)[：:，,\s]*/u, '')
+    .split(/[。！？!?；;]/)[0]
+    .trim()
+    .replace(/^[“"'']|[”"'']$/g, '')
+    .trim();
+
+  if (!firstClause) return null;
+  const tooGeneric = new Set(['当然', '好的', '没问题', '可以', '当然可以', '好的，我们开始']);
+  if (tooGeneric.has(firstClause)) return null;
+  if (firstClause.length < 4) return null;
+  return firstClause.length > 25 ? `${firstClause.substring(0, 25)}…` : firstClause;
+}
+
+function pickInitialSessionTitle(userMessage: string, aiMessage?: string): string {
+  return extractAssistantTitleCandidate(aiMessage || '') || generateSessionTitle(userMessage);
+}
+
 // ==================== AI 标题生成 ====================
 
 /**
@@ -300,7 +326,7 @@ async function requestAITitle(
     // 15秒超时，回退到本地标题
     const timeout = setTimeout(() => {
       titleGenMap.delete(tempKey);
-      resolve(generateSessionTitle(userMessage));
+      resolve(pickInitialSessionTitle(userMessage, aiMessage));
       // 尝试删除临时 session（可能失败，忽略）
       apiClient.sessionsDelete(tempKey).catch(() => {});
     }, 15000);
@@ -321,7 +347,7 @@ async function requestAITitle(
     apiClient.chatSend(tempKey, prompt).catch(() => {
       clearTimeout(timeout);
       titleGenMap.delete(tempKey);
-      resolve(generateSessionTitle(userMessage));
+      resolve(pickInitialSessionTitle(userMessage, aiMessage));
     });
   });
 }
@@ -1028,6 +1054,18 @@ export const useChatStore = create<ChatState>((set, get) => {
           const firstUserMsg = state.messages.find(m => m.role === 'user');
           const sessionKeyForTitle = state.currentSessionKey;
           if (firstUserMsg && sessionKeyForTitle) {
+            const fallbackTitle = extractAssistantTitleCandidate(finalText);
+            if (fallbackTitle) {
+              set((s) => ({
+                sessions: s.sessions.map((sess) =>
+                  sess.key === sessionKeyForTitle
+                    ? { ...sess, title: fallbackTitle }
+                    : sess
+                ),
+              }));
+              db.updateSessionTitle(sessionKeyForTitle, fallbackTitle).catch(() => {});
+              apiClient.saveSessionTitle(sessionKeyForTitle, fallbackTitle).catch(() => {});
+            }
             // 异步生成标题，不阻塞主流程
             requestAITitle(firstUserMsg.content, finalText, sessionKeyForTitle)
               .then((title) => {

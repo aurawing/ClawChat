@@ -42,7 +42,7 @@ cd ..
 npx clawchat-proxy
 ```
 
-On first launch, the CLI wizard creates `~/.clawchat-proxy`.
+On first launch, the CLI wizard creates the `~/.clawchat-proxy/` directory, with the config file stored at `~/.clawchat-proxy/.clawchat-proxy`.
 
 ### 2.1 Local `npm link` verification
 
@@ -62,7 +62,7 @@ cd server
 npm unlink -g clawchat-proxy
 ```
 
-### 3. Configure `~/.clawchat-proxy`
+### 3. Configure `~/.clawchat-proxy/.clawchat-proxy`
 
 ```env
 PROXY_PORT=18888

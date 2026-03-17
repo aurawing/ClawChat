@@ -11,7 +11,8 @@ import { useLocale } from '../hooks/useLocale';
 export default function LoginPage() {
   const { connect, connectionStatus, errorMessage } = useChatStore();
   const { theme, toggleTheme } = useTheme();
-  const { appName, t } = useLocale();
+  const { appName, t, localePreference, setLocalePreference } = useLocale();
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   const [host, setHost] = useState(() => {
     try {
@@ -43,16 +44,36 @@ export default function LoginPage() {
   const isPairingPending = connectionStatus === 'pairing_pending';
 
   const handleConnect = useCallback(() => {
-    if (!host.trim() || !username.trim() || !token.trim()) return;
+    const trimmedHost = host.trim();
+    const trimmedUsername = username.trim();
+    const trimmedToken = token.trim();
+
+    if (!trimmedHost) {
+      setValidationError(t('validationHostRequired'));
+      return;
+    }
+    if (!/^https?:\/\//i.test(trimmedHost)) {
+      setValidationError(t('validationHostProtocol'));
+      return;
+    }
+    if (!trimmedUsername) {
+      setValidationError(t('validationUsernameRequired'));
+      return;
+    }
+    if (!trimmedToken) {
+      setValidationError(t('validationPasswordRequired'));
+      return;
+    }
 
     const config: ServerConfig = {
-      host: host.trim().replace(/\/+$/, ''),
-      token: token.trim(),
-      username: username.trim(),
+      host: trimmedHost.replace(/\/+$/, ''),
+      token: trimmedToken,
+      username: trimmedUsername,
     };
 
+    setValidationError(null);
     connect(config);
-  }, [host, token, username, connect]);
+  }, [host, token, username, connect, t]);
 
   /** 停止重连 */
   const handleStopReconnect = useCallback(() => {
@@ -72,7 +93,7 @@ export default function LoginPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const showError = connectionStatus === 'error' || connectionStatus === 'auth_failed';
+  const showError = !!validationError || connectionStatus === 'error' || connectionStatus === 'auth_failed';
 
   return (
     <div className="min-h-screen bg-th-base flex flex-col items-center justify-center p-6 safe-area-top safe-area-bottom">
@@ -81,7 +102,7 @@ export default function LoginPage() {
         onClick={toggleTheme}
         className="absolute right-4 w-9 h-9 flex items-center justify-center rounded-xl bg-th-elevated text-th-text-muted hover:text-th-text transition-colors p-0 leading-none"
         style={{ top: 'calc(env(safe-area-inset-top, 0px) + 1rem)' }}
-        title={theme === 'dark' ? '切换为浅色' : '切换为深色'}
+        title={theme === 'dark' ? t('switchToLight') : t('switchToDark')}
       >
         {theme === 'dark' ? (
           <svg className="block w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -107,49 +128,72 @@ export default function LoginPage() {
 
       {/* 表单 */}
       <div className="w-full max-w-sm space-y-4">
+        <div>
+          <label className="block text-sm text-th-text-muted mb-1.5">{t('languageLabel')}</label>
+          <select
+            value={localePreference}
+            onChange={(e) => setLocalePreference(e.target.value as 'system' | 'zh-CN' | 'en')}
+            disabled={isConnecting || isPairingPending}
+            className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
+          >
+            <option value="system">{t('followSystem')}</option>
+            <option value="zh-CN">{t('chinese')}</option>
+            <option value="en">{t('english')}</option>
+          </select>
+        </div>
+
         {/* 服务器地址 */}
         <div>
-          <label className="block text-sm text-th-text-muted mb-1.5">服务器地址</label>
+          <label className="block text-sm text-th-text-muted mb-1.5">{t('serverAddressLabel')}</label>
           <input
             type="text"
             value={host}
-            onChange={(e) => setHost(e.target.value)}
+            onChange={(e) => {
+              setHost(e.target.value);
+              if (validationError) setValidationError(null);
+            }}
             placeholder="http://example.com:18888"
             disabled={isConnecting || isPairingPending}
             className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
             onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
           />
           <p className="text-xs text-th-text-faint mt-1">
-            请输入完整地址，包含 `http://` 或 `https://`
+            {t('serverAddressHint')}
           </p>
         </div>
 
         {/* 用户名 */}
         <div>
-          <label className="block text-sm text-th-text-muted mb-1.5">用户名</label>
+          <label className="block text-sm text-th-text-muted mb-1.5">{t('usernameLabel')}</label>
           <input
             type="text"
             value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="~/.clawchat-proxy 中的用户名"
+            onChange={(e) => {
+              setUsername(e.target.value);
+              if (validationError) setValidationError(null);
+            }}
+            placeholder={t('usernamePlaceholder')}
             disabled={isConnecting || isPairingPending}
             className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
             onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
           />
           <p className="text-xs text-th-text-faint mt-1">
-            需与 `~/.clawchat-proxy` 中 `PROXY_USERS` 配置的用户名一致
+            {t('usernameHint')}
           </p>
         </div>
 
         {/* 用户密码 */}
         <div>
-          <label className="block text-sm text-th-text-muted mb-1.5">用户密码</label>
+          <label className="block text-sm text-th-text-muted mb-1.5">{t('userPasswordLabel')}</label>
           <div className="relative">
             <input
               type={showToken ? 'text' : 'password'}
               value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder="对应用户名的密码"
+              onChange={(e) => {
+                setToken(e.target.value);
+                if (validationError) setValidationError(null);
+              }}
+              placeholder={t('userPasswordPlaceholder')}
               disabled={isConnecting || isPairingPending}
               className="w-full bg-th-input border border-th-border rounded-xl px-4 py-3 pr-11 text-th-text text-sm placeholder-th-text-dim outline-none focus:border-emerald-500/50 transition-colors disabled:opacity-50"
               onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
@@ -184,23 +228,22 @@ export default function LoginPage() {
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                 </svg>
-                {connectionStatus === 'reconnecting' ? '重连中...' : '连接中...'}
+                {connectionStatus === 'reconnecting' ? t('connectingStatus') : t('connectingStatus')}
               </span>
             </button>
             <button
               onClick={handleStopReconnect}
               className="w-full py-2 rounded-xl border border-th-border text-th-text-muted hover:text-th-text hover:border-th-text-dim text-sm transition-colors"
             >
-              取消
+              {t('cancelAction')}
             </button>
           </div>
         ) : (
           <button
             onClick={handleConnect}
-            disabled={!host.trim() || !username.trim() || !token.trim()}
             className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:from-neutral-700 disabled:to-neutral-700 text-white font-medium text-sm transition-all disabled:cursor-not-allowed"
           >
-            {showError ? '重试' : '连接'}
+            {showError ? t('retryAction') : t('connectAction')}
           </button>
         )}
 
@@ -212,18 +255,13 @@ export default function LoginPage() {
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
               </svg>
-              <p className="font-medium">🔗 等待设备配对批准</p>
+              <p className="font-medium">🔗 {t('pairingPendingTitle')}</p>
             </div>
-            <p className="text-amber-400/80 text-xs mb-3 leading-relaxed">
-              代理服务首次连接 OpenClaw Gateway 时需要配对批准。
-              请前往 <strong>OpenClaw 控制台</strong> 的
-              <strong> Nodes → Devices </strong>
-              页面，找到以下设备并批准连接。
-            </p>
+            <p className="text-amber-400/80 text-xs mb-3 leading-relaxed">{t('pairingPendingHint')}</p>
             <div className="space-y-2">
               {apiClient.requestId && (
                 <div className="bg-amber-500/5 border border-amber-500/10 rounded-lg px-3 py-2">
-                  <p className="text-amber-400/60 text-xs mb-1">配对请求 ID:</p>
+                  <p className="text-amber-400/60 text-xs mb-1">{t('pairingRequestIdLabel')}</p>
                   <p className="text-amber-300/90 text-sm font-mono break-all select-all font-bold">
                     {apiClient.requestId}
                   </p>
@@ -231,7 +269,7 @@ export default function LoginPage() {
               )}
               {apiClient.deviceId && (
                 <div className="bg-amber-500/5 border border-amber-500/10 rounded-lg px-3 py-2">
-                  <p className="text-amber-400/60 text-xs mb-1">设备 ID:</p>
+                  <p className="text-amber-400/60 text-xs mb-1">{t('deviceIdLabel')}</p>
                   <p className="text-amber-300/90 text-xs font-mono break-all select-all">
                     {apiClient.deviceId}
                   </p>
@@ -242,7 +280,7 @@ export default function LoginPage() {
               onClick={handleStopReconnect}
               className="w-full mt-3 py-2 rounded-xl border border-amber-500/30 text-amber-400 hover:text-amber-200 hover:border-amber-500/50 text-xs transition-colors"
             >
-              取消连接
+              {t('cancelConnectAction')}
             </button>
           </div>
         )}
@@ -251,10 +289,10 @@ export default function LoginPage() {
         {showError && (
           <div className="bg-red-500/10 border border-red-500/20 rounded-xl px-4 py-3 text-red-300 text-sm">
             <p className="font-medium mb-1">
-              {connectionStatus === 'auth_failed' ? '🔒 认证失败' : '❌ 连接失败'}
+              {connectionStatus === 'auth_failed' ? `🔒 ${t('authFailedTitle')}` : `❌ ${t('connectFailedTitle')}`}
             </p>
             <p className="text-red-400/80 text-xs">
-              {errorMessage || (connectionStatus === 'auth_failed' ? '请检查用户名和用户密码是否正确' : '请检查服务器地址和网络')}
+              {validationError || errorMessage || (connectionStatus === 'auth_failed' ? t('authFailedHint') : t('connectFailedHint'))}
             </p>
           </div>
         )}
@@ -262,7 +300,7 @@ export default function LoginPage() {
 
       {/* 底部提示 */}
       <div className="text-xs text-th-text-faint mt-8 text-center space-y-1">
-        <p>SSE+POST 架构 · Ed25519 设备签名</p>
+        <p>{t('appArchitectureHint')}</p>
       </div>
     </div>
   );

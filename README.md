@@ -71,7 +71,7 @@ cd ..
 
 ### 2. 启动后端代理服务
 
-**首次启动会进入引导，并在用户目录下生成配置文件 `~/.clawchat-proxy`。**
+**首次启动会进入引导，并在用户目录下生成配置目录 `~/.clawchat-proxy/`，其中配置文件位于 `~/.clawchat-proxy/.clawchat-proxy`。**
 
 ```bash
 npx clawchat-proxy
@@ -81,8 +81,8 @@ npx clawchat-proxy
 
 ```
 欢迎使用 ClawChat Proxy 初始化向导
-配置文件将写入: ~/.clawchat-proxy
-配置已写入: ~/.clawchat-proxy
+配置文件将写入: ~/.clawchat-proxy/.clawchat-proxy
+配置已写入: ~/.clawchat-proxy/.clawchat-proxy
 ```
 
 填写好 `PROXY_USERS` 后，在 App 登录时输入对应的用户名和密码即可。后续直接运行 `npx clawchat-proxy` 即可启动。
@@ -107,7 +107,7 @@ npm unlink -g clawchat-proxy
 
 ### 3. 配置（可选）
 
-如需自定义配置，编辑 `~/.clawchat-proxy`：
+如需自定义配置，编辑 `~/.clawchat-proxy/.clawchat-proxy`：
 
 ```env
 # 代理服务端口
@@ -149,7 +149,7 @@ ALLOWED_ORIGINS=
 | `DOWNLOAD_PATH_MAPS` | 虚拟路径到本机真实路径的映射 | 例如 `/root/.openclaw/workspace=>~/workspace` |
 | `ALLOWED_ORIGINS` | 允许的跨域来源 | 留空表示允许全部 |
 
-> **注意：** 如果 OpenClaw 启用了设备配对机制，首次连接可能需要在 OpenClaw 端手动批准设备。代理服务会自动生成 Ed25519 设备密钥，运行数据默认保存在 `~/.clawchat-proxy-data/`。
+> **注意：** 如果 OpenClaw 启用了设备配对机制，首次连接可能需要在 OpenClaw 端手动批准设备。代理服务会自动生成 Ed25519 设备密钥，配置和运行数据默认都保存在 `~/.clawchat-proxy/` 中。
 
 ### 4. 启动服务
 
@@ -184,7 +184,7 @@ npx clawchat-proxy
 1. 打开 App（浏览器或 Capacitor 原生应用）
 2. 在登录页填写：
    - **服务器地址**：`http://192.168.1.100:18888`
-   - **用户名 / 密码**：`~/.clawchat-proxy` 中 `PROXY_USERS` 里对应的一组账号
+   - **用户名 / 密码**：`~/.clawchat-proxy/.clawchat-proxy` 中 `PROXY_USERS` 里对应的一组账号
 3. 点击「连接」
 
 连接成功后自动进入聊天界面。
@@ -387,8 +387,11 @@ ClawChat/
 运行时文件默认写入：
 
 ```text
-~/.clawchat-proxy
-~/.clawchat-proxy-data/
+~/.clawchat-proxy/
+├── .clawchat-proxy
+├── .device-key.json
+├── clawchat.db
+└── uploads/
 ```
 
 ## 技术栈
@@ -413,8 +416,8 @@ ClawChat/
 1. 确认 OpenClaw Gateway 已启动（默认端口 18789）
 2. 确认代理服务已启动（`npx clawchat-proxy`）
 3. 查看代理服务控制台的错误日志
-4. 检查 `~/.clawchat-proxy` 中的 Gateway 地址和认证信息是否正确
-5. 检查 App 中填写的服务器地址、用户名和密码是否与 `~/.clawchat-proxy` 中的 `PROXY_USERS` 一致
+4. 检查 `~/.clawchat-proxy/.clawchat-proxy` 中的 Gateway 地址和认证信息是否正确
+5. 检查 App 中填写的服务器地址、用户名和密码是否与 `~/.clawchat-proxy/.clawchat-proxy` 中的 `PROXY_USERS` 一致
 6. 如果跨网络访问，确认防火墙已放行 18888 端口
 
 ### Q: 手机连不上本地服务？
@@ -423,9 +426,9 @@ ClawChat/
 
 ### Q: Gateway 认证失败？
 
-- 检查 `~/.clawchat-proxy` 中的 `OPENCLAW_GATEWAY_TOKEN` 或 `OPENCLAW_GATEWAY_PASSWORD` 是否正确
+- 检查 `~/.clawchat-proxy/.clawchat-proxy` 中的 `OPENCLAW_GATEWAY_TOKEN` 或 `OPENCLAW_GATEWAY_PASSWORD` 是否正确
 - 如果 OpenClaw 启用了设备配对，需在 OpenClaw 端批准新设备
-- 设备密钥保存在 `~/.clawchat-proxy-data/.device-key.json`，如需重新配对可删除此文件重启服务
+- 设备密钥保存在 `~/.clawchat-proxy/.device-key.json`，如需重新配对可删除此文件重启服务
 
 ### Q: 如何获取 OpenClaw Gateway Token？
 
@@ -435,7 +438,7 @@ ClawChat/
 cat ~/.openclaw/openclaw.json
 ```
 
-如果未自动识别成功，再手动查看其中 `gateway.auth` 下的配置并填入 `~/.clawchat-proxy`。
+如果未自动识别成功，再手动查看其中 `gateway.auth` 下的配置并填入 `~/.clawchat-proxy/.clawchat-proxy`。
 
 ### Q: 文件上传大小限制？
 

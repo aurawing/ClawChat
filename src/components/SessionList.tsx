@@ -1,5 +1,6 @@
 import { useState, useRef } from 'react';
 import type { Session } from '../types';
+import { useLocale } from '../hooks/useLocale';
 
 interface SessionListProps {
   sessions: Session[];
@@ -33,35 +34,41 @@ export default function SessionList({
   theme,
   onToggleTheme,
 }: SessionListProps) {
+  const { t, locale } = useLocale();
+  const normalizeSessionTitle = (title: string) => {
+    if (title === '主对话') return t('mainSessionTitle');
+    if (title === '新对话') return t('newSessionTitle');
+    return title;
+  };
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
     const now = new Date();
     const isToday = date.toDateString() === now.toDateString();
 
     if (isToday) {
-      return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
     }
 
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
     if (date.toDateString() === yesterday.toDateString()) {
-      return '昨天';
+      return t('yesterdayLabel');
     }
 
-    return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+    return date.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
   };
 
   return (
     <div className="h-full flex flex-col bg-th-surface">
       {/* 头部 */}
       <div className="flex items-center justify-between px-4 py-4 border-b border-th-border-subtle safe-area-top">
-        <h2 className="text-lg font-semibold text-th-text">会话</h2>
+        <h2 className="text-lg font-semibold text-th-text">{t('sessionsTitle')}</h2>
         <div className="flex gap-2">
           {/* 新建会话按钮 */}
           <button
             onClick={onNewSession}
             className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-emerald-400"
-            title="新建对话"
+            title={t('newConversationAction')}
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -71,7 +78,7 @@ export default function SessionList({
           <button
             onClick={onRefresh}
             className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
-            title="刷新会话列表"
+            title={t('refreshSessionsTitle')}
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -95,8 +102,8 @@ export default function SessionList({
             <svg className="w-12 h-12 mb-3 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
             </svg>
-            <p className="text-sm">暂无会话</p>
-            <p className="text-xs mt-1">直接发送消息开始对话</p>
+            <p className="text-sm">{t('noSessionsTitle')}</p>
+            <p className="text-xs mt-1">{t('startChatHint')}</p>
           </div>
         ) : (
           <div className="py-2">
@@ -108,6 +115,9 @@ export default function SessionList({
                 onSelect={() => onSelectSession(session.key)}
                 onDelete={() => onDeleteSession(session.key)}
                 formatTime={formatTime}
+                deleteLabel={t('deleteAction')}
+                deleteConfirm={t('deleteSessionConfirm')}
+                titleText={normalizeSessionTitle(session.title)}
               />
             ))}
           </div>
@@ -124,15 +134,15 @@ export default function SessionList({
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm text-th-text-secondary truncate">
-                {username || '未命名用户'}
+                {username || t('unnamedUser')}
               </p>
-              <p className="text-xs text-th-text-dim">已连接</p>
+              <p className="text-xs text-th-text-dim">{t('connectedStatus')}</p>
             </div>
             {onOpenSettings && (
               <button
                 onClick={onOpenSettings}
                 className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-dim hover:text-th-text"
-                title="连接设置"
+                title={t('connectionSettingsAction')}
               >
                 <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -144,7 +154,7 @@ export default function SessionList({
               <button
                 onClick={onToggleTheme}
                 className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-dim hover:text-th-text"
-                title={theme === 'dark' ? '切换为浅色' : '切换为深色'}
+                title={theme === 'dark' ? t('switchToLight') : t('switchToDark')}
               >
                 {theme === 'dark' ? (
                   <svg className="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -161,7 +171,7 @@ export default function SessionList({
               <button
                 onClick={onDisconnect}
                 className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-dim hover:text-red-400"
-                title="断开连接"
+                title={t('disconnectAction')}
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
@@ -182,12 +192,18 @@ function SessionItem({
   onSelect,
   onDelete,
   formatTime,
+  deleteLabel,
+  deleteConfirm,
+  titleText,
 }: {
   session: Session;
   isCurrent: boolean;
   onSelect: () => void;
   onDelete: () => void;
   formatTime: (ts: number) => string;
+  deleteLabel: string;
+  deleteConfirm: string;
+  titleText: string;
 }) {
   const [showDelete, setShowDelete] = useState(false);
   const touchStartX = useRef(0);
@@ -219,7 +235,7 @@ function SessionItem({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            if (confirm('确定删除此会话？')) {
+            if (confirm(deleteConfirm)) {
               onDelete();
               setShowDelete(false);
             } else {
@@ -230,7 +246,7 @@ function SessionItem({
             showDelete ? 'translate-x-0' : 'translate-x-full'
           }`}
         >
-          删除
+          {deleteLabel}
         </button>
       </div>
 
@@ -248,7 +264,7 @@ function SessionItem({
         }}
       >
         <div className="flex-1 min-w-0">
-          <p className="text-sm text-th-text-secondary truncate">{session.title}</p>
+          <p className="text-sm text-th-text-secondary truncate">{titleText}</p>
         </div>
         <div className="flex items-center gap-2 ml-2 shrink-0">
           <span className="text-xs text-th-text-faint">{formatTime(session.updatedAt)}</span>
@@ -256,7 +272,7 @@ function SessionItem({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              if (confirm('确定删除此会话？')) {
+              if (confirm(deleteConfirm)) {
                 onDelete();
               }
             }}

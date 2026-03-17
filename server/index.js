@@ -34,9 +34,12 @@ import Database from 'better-sqlite3';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PACKAGE_DIR = __dirname;
-const CONFIG_PATH = resolve(process.env.CLAWCHAT_PROXY_CONFIG || join(homedir(), '.clawchat-proxy'));
+const DEFAULT_PROXY_HOME = resolve(process.env.CLAWCHAT_PROXY_HOME || join(homedir(), '.clawchat-proxy'));
+const LEGACY_CONFIG_PATH = resolve(join(homedir(), '.clawchat-proxy'));
+const LEGACY_DATA_DIR = resolve(join(homedir(), '.clawchat-proxy-data'));
+const CONFIG_PATH = resolve(process.env.CLAWCHAT_PROXY_CONFIG || join(DEFAULT_PROXY_HOME, '.clawchat-proxy'));
 const CONFIG_DIR = dirname(CONFIG_PATH);
-const DATA_DIR = resolve(process.env.CLAWCHAT_PROXY_DATA_DIR || join(homedir(), '.clawchat-proxy-data'));
+const DATA_DIR = resolve(process.env.CLAWCHAT_PROXY_DATA_DIR || CONFIG_DIR);
 const OPENCLAW_CONFIG_PATH = join(homedir(), '.openclaw', 'openclaw.json');
 const DEFAULT_PORT = '18888';
 const DEFAULT_GATEWAY_URL = 'ws://127.0.0.1:18789';
@@ -165,6 +168,78 @@ function buildConfigContent(values) {
   return lines.join('\n');
 }
 
+function moveDirectoryEntries(sourceDir, targetDir, label) {
+  if (!existsSync(sourceDir)) return;
+  mkdirSync(targetDir, { recursive: true });
+
+  for (const entry of readdirSync(sourceDir)) {
+    const sourcePath = join(sourceDir, entry);
+    const targetPath = join(targetDir, entry);
+    if (existsSync(targetPath)) continue;
+    try {
+      renameSync(sourcePath, targetPath);
+      console.log(`[INFO] 已迁移${label}: ${sourcePath} -> ${targetPath}`);
+    } catch (error) {
+      console.warn(`[WARN] 迁移${label}失败: ${sourcePath} (${error.message})`);
+    }
+  }
+
+  try {
+    if (readdirSync(sourceDir).length === 0) rmSync(sourceDir, { recursive: true, force: true });
+  } catch (error) {
+    console.warn(`[WARN] 清理旧目录失败: ${sourceDir} (${error.message})`);
+  }
+}
+
+function migrateLegacyHomeLayout() {
+  if (process.env.CLAWCHAT_PROXY_CONFIG || process.env.CLAWCHAT_PROXY_DATA_DIR || process.env.CLAWCHAT_PROXY_HOME) {
+    return;
+  }
+
+  if (
+    LEGACY_CONFIG_PATH === CONFIG_DIR &&
+    existsSync(LEGACY_CONFIG_PATH) &&
+    statSync(LEGACY_CONFIG_PATH).isFile() &&
+    !existsSync(CONFIG_PATH)
+  ) {
+    const tempPath = resolve(join(homedir(), `.clawchat-proxy.migrate-${Date.now()}`));
+    try {
+      renameSync(LEGACY_CONFIG_PATH, tempPath);
+      mkdirSync(CONFIG_DIR, { recursive: true });
+      renameSync(tempPath, CONFIG_PATH);
+      console.log(`[INFO] 已迁移旧版配置文件: ${LEGACY_CONFIG_PATH} -> ${CONFIG_PATH}`);
+    } catch (error) {
+      console.warn(`[WARN] 迁移旧版配置文件失败: ${error.message}`);
+      if (existsSync(tempPath) && !existsSync(LEGACY_CONFIG_PATH)) {
+        try {
+          renameSync(tempPath, LEGACY_CONFIG_PATH);
+        } catch {
+          // Ignore rollback failures and let the later config check surface the issue.
+        }
+      }
+    }
+  }
+
+  if (
+    LEGACY_CONFIG_PATH !== CONFIG_PATH &&
+    existsSync(LEGACY_CONFIG_PATH) &&
+    statSync(LEGACY_CONFIG_PATH).isFile() &&
+    !existsSync(CONFIG_PATH)
+  ) {
+    try {
+      mkdirSync(CONFIG_DIR, { recursive: true });
+      renameSync(LEGACY_CONFIG_PATH, CONFIG_PATH);
+      console.log(`[INFO] 已迁移旧版配置文件: ${LEGACY_CONFIG_PATH} -> ${CONFIG_PATH}`);
+    } catch (error) {
+      console.warn(`[WARN] 迁移旧版配置文件失败: ${error.message}`);
+    }
+  }
+
+  if (LEGACY_DATA_DIR !== DATA_DIR) {
+    moveDirectoryEntries(LEGACY_DATA_DIR, DATA_DIR, '旧版运行数据');
+  }
+}
+
 async function runSetupWizard() {
   mkdirSync(CONFIG_DIR, { recursive: true });
   const preset = loadOpenClawAuthPreset();
@@ -258,6 +333,7 @@ function migrateLegacyRuntimeData() {
   }
 }
 
+migrateLegacyHomeLayout();
 await ensureConfigFile();
 config({ path: CONFIG_PATH, override: true });
 migrateLegacyRuntimeData();
