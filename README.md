@@ -280,6 +280,34 @@ cd android
 
 APK 输出路径：`android/app/build/outputs/apk/debug/app-debug.apk`
 
+**手动签名 release APK（推荐将 keystore 放在 `android/signing/`）：**
+
+```powershell
+# 1. 构建 release（得到 unsigned APK）
+npm run cap:sync
+cd android
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+.\gradlew.bat assembleRelease
+
+# 2. 使用 Android SDK Build Tools 中的 apksigner 进行手动签名
+& "$env:LOCALAPPDATA\Android\Sdk\build-tools\<build-tools-version>\apksigner.bat" sign `
+  --ks ".\signing\clawchat-release.jks" `
+  --ks-key-alias "clawchat" `
+  --out ".\app\build\outputs\apk\release\app-release.apk" `
+  ".\app\build\outputs\apk\release\app-release-unsigned.apk"
+
+# 3. 校验签名
+& "$env:LOCALAPPDATA\Android\Sdk\build-tools\<build-tools-version>\apksigner.bat" verify --verbose `
+  ".\app\build\outputs\apk\release\app-release.apk"
+```
+
+release 输出路径：
+
+- 未签名：`android/app/build/outputs/apk/release/app-release-unsigned.apk`
+- 已签名：`android/app/build/outputs/apk/release/app-release.apk`
+
+> **注意：** `android/signing/` 已加入 `.gitignore`，适合存放本地 keystore，但不要把 keystore 和密码提交到仓库。
+
 **注意：** Android 真机调试时需要允许明文 HTTP（如果代理服务未配置 HTTPS）。`android/app/src/main/AndroidManifest.xml` 中已默认包含 `android:usesCleartextTraffic="true"`。
 
 ### iOS（仅 macOS）

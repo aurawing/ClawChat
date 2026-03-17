@@ -144,6 +144,31 @@ APK output:
 
 `android/app/build/outputs/apk/debug/app-debug.apk`
 
+For a manually signed release APK, you can keep your keystore under `android/signing/` and use:
+
+```powershell
+npm run cap:sync
+cd android
+$env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr"
+.\gradlew.bat assembleRelease
+
+& "$env:LOCALAPPDATA\Android\Sdk\build-tools\<build-tools-version>\apksigner.bat" sign `
+  --ks ".\signing\clawchat-release.jks" `
+  --ks-key-alias "clawchat" `
+  --out ".\app\build\outputs\apk\release\app-release.apk" `
+  ".\app\build\outputs\apk\release\app-release-unsigned.apk"
+
+& "$env:LOCALAPPDATA\Android\Sdk\build-tools\<build-tools-version>\apksigner.bat" verify --verbose `
+  ".\app\build\outputs\apk\release\app-release.apk"
+```
+
+Release outputs:
+
+- unsigned: `android/app/build/outputs/apk/release/app-release-unsigned.apk`
+- signed: `android/app/build/outputs/apk/release/app-release.apk`
+
+`android/signing/` is ignored by git, so it is suitable for storing a local keystore. Do not commit the keystore or passwords.
+
 ## License
 
 MIT

@@ -34,6 +34,10 @@ android/.idea/
 android/local.properties
 android/*.iml
 android/**/*.iml
+android/signing/*
+!android/signing/.gitkeep
+*.jks
+*.keystore
 
 # iOS 构建产物
 ios/App/Pods/
