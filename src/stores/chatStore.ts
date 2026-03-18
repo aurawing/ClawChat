@@ -71,19 +71,24 @@ function stripOperatorInjectedContent(text: string): string {
     /\n*以下是用户本轮上传文档中提取的正文内容，请结合这些内容回答。[^\S\r\n]*[\s\S]*$/g,
     ''
   );
+  // 去除被代理/终端注入到用户消息前部的执行完成日志
+  text = text.replace(
+    /^(?:\s*System:\s*\[[^\]]+\]\s*Exec completed\s*\([^)]+\)\s*::\s*[\s\S]*?(?=(?:\s*System:\s*\[[^\]]+\]\s*Exec completed|\s*\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-|$)))+/i,
+    ''
+  );
   return text.trim();
 }
 
 /** 去除消息开头的时间戳前缀 */
 function stripTimestampPrefix(text: string): string {
   // [Fri 2026-03-13 05:49 UTC] 或 [Mon 2026-03-13 05:49:30 UTC] （带星期和时区）
-  text = text.replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|[A-Z]{2,5})?\]\s*/gi, '');
+  text = text.replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:(?:UTC|GMT)(?:[+-]\d{1,2})?|[A-Z]{2,5})?\]\s*/gi, '');
   // [2026-03-13 12:00:00] 或 [2026-03-13T12:00:00.000Z]
   text = text.replace(/^\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\]\s*/g, '');
   // 2026-03-13 12:00:00\n 或 2026-03-13T12:00:00.000Z\n（独占一行的时间戳）
   text = text.replace(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\s*\n/g, '');
   // Fri 2026-03-13 05:49 UTC\n（不带方括号，带星期和时区，独占一行）
-  text = text.replace(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|[A-Z]{2,5})?\s*\n/gi, '');
+  text = text.replace(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:(?:UTC|GMT)(?:[+-]\d{1,2})?|[A-Z]{2,5})?\s*\n/gi, '');
   // [12:00:00] 或 [12:00]
   text = text.replace(/^\[\d{2}:\d{2}(?::\d{2})?\]\s*/g, '');
   // 纯数字时间戳开头 (Unix ms) 后跟换行
@@ -380,6 +385,7 @@ interface ChatState {
 
   // 消息
   messages: Message[];
+  isHistoryLoading: boolean;
 
   // 流式状态
   isStreaming: boolean;
@@ -571,8 +577,48 @@ interface BgStreamState {
   createdAt: number;
 }
 const bgStreams = new Map<string, BgStreamState>();
+const sessionMessagesCache = new Map<string, Message[]>();
 let historyRequestSerial = 0;
 let sessionViewVersion = 0;
+
+// ==================== 对话完成标记 ====================
+// 只有 chat.final 才是真正的对话结束信号。
+// agent.lifecycle end 仅结束当前一轮（agent 可能有多轮：工具调用 → 输出 → 继续）。
+// 此标记用于区分"一轮结束"和"整个对话结束"，防止后续轮次的事件被误拦。
+let _conversationFinalized = false;
+
+// ==================== 流式超时保护 ====================
+// 软超时：最后一次收到 **有实际内容** 的事件后 15 秒无新内容，自动 finalize。
+// 硬超时：从 sendMessage 开始 3 分钟绝对上限，无论有无事件到达都会 finalize。
+const STREAMING_SOFT_TIMEOUT_MS = 15_000;
+const STREAMING_HARD_TIMEOUT_MS = 3 * 60 * 1000;
+let _streamingSoftHandle: ReturnType<typeof setTimeout> | null = null;
+let _streamingHardHandle: ReturnType<typeof setTimeout> | null = null;
+
+function _resetStreamingSoftTimeout(finalizeFn: () => void) {
+  if (_streamingSoftHandle) clearTimeout(_streamingSoftHandle);
+  _streamingSoftHandle = setTimeout(() => {
+    _streamingSoftHandle = null;
+    finalizeFn();
+  }, STREAMING_SOFT_TIMEOUT_MS);
+}
+function _startStreamingHardTimeout(finalizeFn: () => void) {
+  if (_streamingHardHandle) clearTimeout(_streamingHardHandle);
+  _streamingHardHandle = setTimeout(() => {
+    _streamingHardHandle = null;
+    finalizeFn();
+  }, STREAMING_HARD_TIMEOUT_MS);
+}
+function _clearStreamingTimeout() {
+  if (_streamingSoftHandle) {
+    clearTimeout(_streamingSoftHandle);
+    _streamingSoftHandle = null;
+  }
+  if (_streamingHardHandle) {
+    clearTimeout(_streamingHardHandle);
+    _streamingHardHandle = null;
+  }
+}
 
 function stripThinkingBlocks(blocks?: MessageBlock[]): MessageBlock[] | undefined {
   if (!blocks?.length) return undefined;
@@ -587,6 +633,95 @@ function hideThinkingForDisplay(message: Message): Message {
     thinking: undefined,
     blocks: stripThinkingBlocks(message.blocks),
   };
+}
+
+function isPlaceholderSessionTitle(title?: string | null): boolean {
+  return !title || title === '新对话' || title === '主对话';
+}
+
+function buildToolCallSignature(toolCalls?: ToolCall[]): string {
+  if (!toolCalls?.length) return '';
+  return toolCalls
+    .map((tc) => `${tc.name}|${tc.status}|${tc.input || ''}|${tc.output || ''}`)
+    .sort()
+    .join('||');
+}
+
+function isDuplicateAssistantMessage(
+  message: Message | undefined,
+  content: string,
+  thinking?: string,
+  toolCalls?: ToolCall[],
+): boolean {
+  if (!message || message.role !== 'assistant') return false;
+  const sameContent = message.content.trim() === content.trim();
+  const sameThinking = (message.thinking || '').trim() === (thinking || '').trim();
+  const sameTools = buildToolCallSignature(message.toolCalls) === buildToolCallSignature(toolCalls);
+  return sameContent && sameThinking && sameTools;
+}
+
+function dedupeMessages(messages: Message[]): Message[] {
+  const deduped: Message[] = [];
+  for (const msg of messages) {
+    const last = deduped[deduped.length - 1];
+    if (!last) {
+      deduped.push(msg);
+      continue;
+    }
+    if (last.id === msg.id) {
+      deduped[deduped.length - 1] = msg;
+      continue;
+    }
+    if (
+      last.sessionKey === msg.sessionKey
+      && last.role === 'assistant'
+      && msg.role === 'assistant'
+      && isDuplicateAssistantMessage(last, msg.content, msg.thinking, msg.toolCalls)
+    ) {
+      deduped[deduped.length - 1] = msg;
+      continue;
+    }
+    deduped.push(msg);
+  }
+  return deduped;
+}
+
+function looksLikeTranscriptLeak(text: string, historyMessages: Message[]): boolean {
+  const normalized = text.trim();
+  if (!normalized || normalized.length < 80) return false;
+
+  const candidates = historyMessages
+    .filter((msg) => msg.role === 'user' || msg.role === 'assistant')
+    .map((msg) => msg.content.trim())
+    .filter((content) => content.length >= 12);
+
+  let hits = 0;
+  for (const content of candidates) {
+    if (normalized === content) continue;
+    if (normalized.includes(content)) {
+      hits += 1;
+      if (hits >= 2) return true;
+    }
+  }
+  return false;
+}
+
+function resolveStreamingAssistantMessageId(
+  state: ChatState,
+  candidateId?: string,
+): string {
+  if (state.currentAiMessageId) return state.currentAiMessageId;
+
+  const baseId = candidateId || `ai-${uuid()}`;
+  const hasCollision = state.messages.some(
+    (message) =>
+      message.sessionKey === state.currentSessionKey
+      && message.role === 'assistant'
+      && message.id === baseId
+      && !message.isStreaming
+  );
+
+  return hasCollision ? `${baseId}::${uuid()}` : baseId;
 }
 
 /** 处理非当前会话的 agent 事件 — 后台缓冲 */
@@ -836,6 +971,126 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
 export const useChatStore = create<ChatState>((set, get) => {
   // ==================== 事件处理 ====================
 
+  function resetStreamingState(): Partial<ChatState> {
+    _clearStreamingTimeout();
+    return {
+      isStreaming: false,
+      currentAiText: '',
+      currentAiThinking: '',
+      currentAiMessageId: null,
+      currentRunId: null,
+      toolCards: new Map(),
+      currentBlocks: [],
+      _blockThinkingBase: 0,
+      _blockTextBase: 0,
+      _turnBaseText: '',
+      _lastTurnDelta: '',
+      lastAbortedUserMsgId: null,
+    };
+  }
+
+  function finalizeStreamingAssistant(options?: {
+    msgId?: string;
+    finalText?: string;
+    finalThinking?: string;
+    createdAt?: number;
+  }): Message | null {
+    const state = get();
+    const sessionKey = state.currentSessionKey;
+    const msgId = options?.msgId || state.currentAiMessageId;
+    const finalText = options?.finalText ?? state.currentAiText;
+    const finalThinking = options?.finalThinking ?? state.currentAiThinking;
+    const toolCalls = Array.from(state.toolCards.values());
+    const hasContent = !!(finalText || finalThinking || toolCalls.length > 0);
+
+    if (!sessionKey || !msgId || !hasContent) {
+      set(resetStreamingState());
+      return null;
+    }
+
+    const finalBlocks = _snapshotBlocks(state);
+    const aiMsg: Message = {
+      id: msgId,
+      sessionKey,
+      role: 'assistant',
+      content: finalText || '',
+      thinking: finalThinking || undefined,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      blocks: finalBlocks.length > 0 ? finalBlocks : undefined,
+      createdAt: options?.createdAt ?? Date.now(),
+      isStreaming: false,
+    };
+
+    set((s) => ({
+      messages: dedupeMessages([
+        ...s.messages.filter((m) => m.id !== msgId && m.id !== state.currentAiMessageId),
+        aiMsg,
+      ]),
+      ...resetStreamingState(),
+    }));
+
+    db.saveMessage(aiMsg);
+
+    if (aiMsg.toolCalls?.length || aiMsg.thinking || aiMsg.blocks?.length) {
+      apiClient.saveMessageMeta(
+        aiMsg.sessionKey,
+        aiMsg.id,
+        {
+          toolCalls: aiMsg.toolCalls,
+          thinking: aiMsg.thinking,
+          blocks: aiMsg.blocks,
+        }
+      ).catch(() => {});
+    }
+
+    const nextMessages = dedupeMessages([
+      ...state.messages.filter((m) => m.id !== msgId && m.id !== state.currentAiMessageId),
+      aiMsg,
+    ]);
+    sessionMessagesCache.set(sessionKey, nextMessages);
+
+    const currentSession = state.sessions.find((sess) => sess.key === sessionKey);
+    const shouldGenerateTitle = state.messages.filter(m => m.role === 'assistant').length === 0
+      && isPlaceholderSessionTitle(currentSession?.title);
+    if (shouldGenerateTitle) {
+      const firstUserMsg = state.messages.find(m => m.role === 'user');
+      const sessionKeyForTitle = state.currentSessionKey;
+      if (firstUserMsg && sessionKeyForTitle) {
+        const fallbackTitle = extractAssistantTitleCandidate(finalText);
+        if (fallbackTitle) {
+          set((s) => ({
+            sessions: s.sessions.map((sess) =>
+              sess.key === sessionKeyForTitle
+                ? { ...sess, title: fallbackTitle }
+                : sess
+            ),
+          }));
+          db.updateSessionTitle(sessionKeyForTitle, fallbackTitle).catch(() => {});
+          apiClient.saveSessionTitle(sessionKeyForTitle, fallbackTitle).catch(() => {});
+        }
+
+        requestAITitle(firstUserMsg.content, finalText, sessionKeyForTitle)
+          .then((title) => {
+            if (!title || title === '新对话') return;
+            const cleanTitle = title.length > 25 ? title.substring(0, 25) + '…' : title;
+            console.log('[store] AI 生成标题:', cleanTitle, '会话:', sessionKeyForTitle);
+            set((s) => ({
+              sessions: s.sessions.map((sess) =>
+                sess.key === sessionKeyForTitle
+                  ? { ...sess, title: cleanTitle }
+                  : sess
+              ),
+            }));
+            db.updateSessionTitle(sessionKeyForTitle, cleanTitle).catch(() => {});
+            apiClient.saveSessionTitle(sessionKeyForTitle, cleanTitle).catch(() => {});
+          })
+          .catch((e) => console.warn('[store] AI 标题生成失败:', e));
+      }
+    }
+
+    return aiMsg;
+  }
+
   /** 处理 chat 事件 */
   function handleChatEvent(payload: ChatEventPayload) {
     // ====== 拦截标题生成会话的事件 ======
@@ -864,10 +1119,26 @@ export const useChatStore = create<ChatState>((set, get) => {
     const { state: chatState } = payload;
 
     if (chatState === 'delta') {
+      // 只有在 chat.final 已经处理后（整个对话真正结束），才忽略迟到的 delta。
+      // agent.lifecycle end 仅结束当前一轮，后续轮次的 delta 不应被拦截。
+      if (_conversationFinalized) return;
+
       const rawMessageText = extractRawMessageText(payload.message);
       const text = extractText(payload.message);
       const thinking = rawMessageText ? extractThinkingContent(rawMessageText) : '';
-      const msgId = (payload.message?.id as string) || state.currentAiMessageId || `ai-${uuid()}`;
+
+      // 只有当 delta 携带实际内容时才重置软超时（避免空心跳事件无限续命）
+      const hasContentInDelta = !!(text || thinking || (Array.isArray(payload.message?.content) && payload.message!.content.length > 0));
+      if (hasContentInDelta) {
+        _resetStreamingSoftTimeout(() => {
+          const s = get();
+          if (s.isStreaming && s.currentAiMessageId) {
+            console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
+            finalizeStreamingAssistant();
+          }
+        });
+      }
+      const msgId = resolveStreamingAssistantMessageId(state, payload.message?.id as string | undefined);
 
       const updates: Record<string, unknown> = {
         isStreaming: true,
@@ -995,6 +1266,10 @@ export const useChatStore = create<ChatState>((set, get) => {
     }
 
     if (chatState === 'final') {
+      // chat.final 是对话的真正结束信号，标记对话已完成。
+      // 后续到达的 delta / agent 事件将被 _conversationFinalized 拦截。
+      _conversationFinalized = true;
+
       const rawMessageText = extractRawMessageText(payload.message);
       const text = extractText(payload.message);
       const thinking = rawMessageText ? extractThinkingContent(rawMessageText) : '';
@@ -1003,116 +1278,45 @@ export const useChatStore = create<ChatState>((set, get) => {
       // 忽略空 final
       if (!state.currentAiMessageId && !text) return;
 
-      const msgId = (payload.message?.id as string) || state.currentAiMessageId || `ai-${uuid()}`;
-      const finalText = text || currentText;
+      const msgId = state.currentAiMessageId || resolveStreamingAssistantMessageId(state, payload.message?.id as string | undefined);
+      const payloadLooksLeaked = !!text && looksLikeTranscriptLeak(text, state.messages);
+      const currentLooksLeaked = !!currentText && looksLikeTranscriptLeak(currentText, state.messages);
+      const finalText = payloadLooksLeaked && currentText && !currentLooksLeaked
+        ? currentText
+        : (text || currentText);
       const finalThinking = thinking || state.currentAiThinking;
 
-      if (finalText || finalThinking) {
-        // 快照 blocks
-        const finalBlocks = _snapshotBlocks(state);
+      const lastAssistantMsg = [...state.messages]
+        .reverse()
+        .find((m) => m.role === 'assistant' && m.sessionKey === (state.currentSessionKey || ''));
+      const shouldIgnoreLateDuplicate = !state.isStreaming && (
+        ((payload.message?.id as string | undefined) && lastAssistantMsg?.id === payload.message?.id) ||
+        isDuplicateAssistantMessage(lastAssistantMsg, finalText, finalThinking, Array.from(state.toolCards.values()))
+      );
+      if (shouldIgnoreLateDuplicate) {
+        set({ isStreaming: false, currentRunId: null });
+        return;
+      }
 
-        // 创建最终消息
-        const aiMsg: Message = {
-          id: msgId,
-          sessionKey: state.currentSessionKey || '',
-          role: 'assistant',
-          content: finalText,
-          thinking: finalThinking || undefined,
-          toolCalls: Array.from(state.toolCards.values()),
-          blocks: finalBlocks.length > 0 ? finalBlocks : undefined,
+      if (finalText || finalThinking || state.toolCards.size > 0) {
+        const hadNoAssistantReply = state.messages.filter(m => m.role === 'assistant').length === 0;
+        finalizeStreamingAssistant({
+          msgId,
+          finalText,
+          finalThinking,
           createdAt: Date.now(),
-          isStreaming: false,
-        };
-
-        set((s) => ({
-          messages: [
-            ...s.messages.filter((m) => m.id !== msgId && m.id !== state.currentAiMessageId),
-            aiMsg,
-          ],
-          isStreaming: false,
-          currentAiText: '',
-          currentAiThinking: '',
-          currentAiMessageId: null,
-          currentRunId: null,
-          toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
-          _blockTextBase: 0,
-          _turnBaseText: '',
-          _lastTurnDelta: '',
-          lastAbortedUserMsgId: null,
-        }));
-
-        // 持久化到本地 DB
-        db.saveMessage(aiMsg);
-
-        // 持久化元数据到服务端（跨安装恢复）
-        if (aiMsg.toolCalls?.length || aiMsg.thinking || aiMsg.blocks?.length) {
-          apiClient.saveMessageMeta(
-            aiMsg.sessionKey,
-            aiMsg.id,
-            {
-              toolCalls: aiMsg.toolCalls,
-              thinking: aiMsg.thinking,
-              blocks: aiMsg.blocks,
-            }
-          ).catch(() => {});
-        }
-
-        // 如果是第一条 AI 回复, 用 AI 生成会话标题
-        if (state.messages.filter(m => m.role === 'assistant').length === 0) {
-          const firstUserMsg = state.messages.find(m => m.role === 'user');
-          const sessionKeyForTitle = state.currentSessionKey;
-          if (firstUserMsg && sessionKeyForTitle) {
-            const fallbackTitle = extractAssistantTitleCandidate(finalText);
-            if (fallbackTitle) {
-              set((s) => ({
-                sessions: s.sessions.map((sess) =>
-                  sess.key === sessionKeyForTitle
-                    ? { ...sess, title: fallbackTitle }
-                    : sess
-                ),
-              }));
-              db.updateSessionTitle(sessionKeyForTitle, fallbackTitle).catch(() => {});
-              apiClient.saveSessionTitle(sessionKeyForTitle, fallbackTitle).catch(() => {});
-            }
-            // 异步生成标题，不阻塞主流程
-            requestAITitle(firstUserMsg.content, finalText, sessionKeyForTitle)
-              .then((title) => {
-                if (!title || title === '新对话') return;
-                const cleanTitle = title.length > 25 ? title.substring(0, 25) + '…' : title;
-                console.log('[store] AI 生成标题:', cleanTitle, '会话:', sessionKeyForTitle);
-                // 更新 sessions 列表中对应会话的标题
-                set((s) => ({
-                  sessions: s.sessions.map((sess) =>
-                    sess.key === sessionKeyForTitle
-                      ? { ...sess, title: cleanTitle }
-                      : sess
-                  ),
-                }));
-                // 保存到本地 DB + 服务端（跨安装持久化）
-                db.updateSessionTitle(sessionKeyForTitle, cleanTitle).catch(() => {});
-                apiClient.saveSessionTitle(sessionKeyForTitle, cleanTitle).catch(() => {});
-              })
-              .catch((e) => console.warn('[store] AI 标题生成失败:', e));
-          }
+        });
+        if (hadNoAssistantReply) {
           // 同时刷新会话列表（确保新会话出现在列表中）
           setTimeout(() => get().loadSessions(), 500);
         }
+        if (payloadLooksLeaked || currentLooksLeaked) {
+          setTimeout(() => {
+            get().loadHistory().catch(() => {});
+          }, 0);
+        }
       } else {
-        set({
-          isStreaming: false,
-          currentAiText: '',
-          currentAiThinking: '',
-          currentAiMessageId: null,
-          currentRunId: null,
-          toolCards: new Map(),
-          currentBlocks: [],
-          _blockThinkingBase: 0,
-          _blockTextBase: 0,
-          _turnBaseText: '',
-          _lastTurnDelta: '',
-        });
+        set(resetStreamingState());
       }
       return;
     }
@@ -1224,14 +1428,41 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     if (stream === 'lifecycle') {
       if (data?.phase === 'start') {
+        // 如果整个对话已经被 chat.final 标记为完成，忽略迟到的 lifecycle.start。
+        // 但如果只是某一轮结束（lifecycle end），下一轮的 start 应该放行。
+        if (_conversationFinalized) return;
         set({
           isStreaming: true,
           currentRunId: payload.runId || null,
           lastAbortedUserMsgId: null,
         });
+        // lifecycle.start 重置软超时（相当于"流刚开始"）
+        _resetStreamingSoftTimeout(() => {
+          const s = get();
+          if (s.isStreaming && s.currentAiMessageId) {
+            console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
+            finalizeStreamingAssistant();
+          }
+        });
       }
       if (data?.phase === 'end') {
-        set({ isStreaming: false });
+        const current = get();
+        const hasPendingContent = !!(
+          current.currentAiText ||
+          current.currentAiThinking ||
+          current.toolCards.size > 0
+        );
+
+        if (hasPendingContent) {
+          finalizeStreamingAssistant();
+        } else {
+          set(resetStreamingState());
+          // 没有累积到任何内容但 lifecycle 结束了，说明文本可能通过 chat 通道传递
+          // 延迟加载历史确保消息不丢
+          if (current.currentSessionKey) {
+            setTimeout(() => get().loadHistory().catch(() => {}), 500);
+          }
+        }
       }
       return;
     }
@@ -1239,11 +1470,22 @@ export const useChatStore = create<ChatState>((set, get) => {
     // assistant 流 — 高频文本累积 + 思维链提取
     // 注意：agent 模式下工具调用之间，text 可能从头开始（新 turn）
     if (stream === 'assistant') {
+      // 只有 chat.final 后才忽略迟到的 assistant 事件。
+      if (_conversationFinalized) return;
+
       const text = data?.text;
       if (text && typeof text === 'string') {
+        // 有实际文本内容时才重置软超时
+        _resetStreamingSoftTimeout(() => {
+          const s = get();
+          if (s.isStreaming && s.currentAiMessageId) {
+            console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
+            finalizeStreamingAssistant();
+          }
+        });
         const thinking = extractThinkingContent(text);
         const cleaned = stripThinkingTags(text);
-        const msgId = state.currentAiMessageId || `ai-${uuid()}`;
+        const msgId = resolveStreamingAssistantMessageId(state);
 
         const updates: Partial<ChatState> = {
           currentAiMessageId: msgId,
@@ -1276,6 +1518,8 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     // tool 流
     if (stream === 'tool') {
+      // 只有 chat.final 后才忽略迟到的 tool 事件
+      if (_conversationFinalized) return;
       const toolCallId = data?.toolCallId || data?.id || data?.tool_call_id;
       if (!toolCallId) return;
       const name = (data?.name as string) || (data?.tool_name as string) || 'tool';
@@ -1421,6 +1665,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     sessions: [],
     currentSessionKey: null,
     messages: [],
+    isHistoryLoading: false,
     isStreaming: false,
     currentRunId: null,
     currentAiText: '',
@@ -1465,6 +1710,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           currentSessionKey: finalSessionKey || null,
           userId: resolvedUserId,
           username: config.username || apiClient.userId || null,
+          isHistoryLoading: false,
         });
         sessionViewVersion++;
 
@@ -1495,6 +1741,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         currentSessionKey: null,
         messages: [],
         sessions: [],
+        isHistoryLoading: false,
         isStreaming: false,
         currentAiText: '',
         currentAiThinking: '',
@@ -1511,12 +1758,21 @@ export const useChatStore = create<ChatState>((set, get) => {
     },
 
     sendMessage: async (content: string, attachments?: FileAttachment[]) => {
-      const state = get();
-      const sessionKey = state.currentSessionKey;
+      let state = get();
+      let sessionKey = state.currentSessionKey;
       if (!sessionKey) return;
 
       // ——— 如果当前 session 不在列表中，说明是新会话的第一条消息 ———
       const isNewSession = !state.sessions.some((s) => s.key === sessionKey);
+      // 已存在的历史会话在重装/重开后，若消息尚未恢复出来，先补拉历史再发送，
+      // 避免挂起的历史加载被中途覆盖，导致用户看到旧消息瞬间消失。
+      if (!isNewSession && state.messages.length === 0) {
+        await get().loadHistory();
+        state = get();
+        sessionKey = state.currentSessionKey;
+        if (!sessionKey) return;
+      }
+
       if (isNewSession) {
         const title = generateSessionTitle(content); // 用用户问题做标题
         const newSession: Session = {
@@ -1543,11 +1799,23 @@ export const useChatStore = create<ChatState>((set, get) => {
         attachments,
         createdAt: Date.now(),
       };
-      set((s) => ({
-        messages: [...s.messages, userMsg],
-        isStreaming: true,
-        lastAbortedUserMsgId: null,
-      }));
+      const pendingAiMsgId = `ai-${uuid()}`;
+      // 新一轮对话开始，重置"对话已完成"标记，允许事件正常处理。
+      _conversationFinalized = false;
+      // 发送新问题前强制清空上一轮遗留的流式缓存，
+      // 避免旧的 assistant 临时状态混入本轮，导致历史消失或最后一条串接前文。
+      bgStreams.delete(sessionKey);
+      set((s) => {
+        const nextMessages = [...s.messages, userMsg];
+        sessionMessagesCache.set(sessionKey, nextMessages);
+        return {
+          ...resetStreamingState(),
+          messages: nextMessages,
+          isStreaming: true,
+          currentAiMessageId: pendingAiMsgId,
+          lastAbortedUserMsgId: null,
+        };
+      });
       db.saveMessage(userMsg);
 
       // 构造 Gateway 附件格式
@@ -1557,6 +1825,28 @@ export const useChatStore = create<ChatState>((set, get) => {
         fileName: att.name,
         category: att.type.startsWith('image/') ? 'image' : 'file',
       }));
+
+      // 启动双重超时保护：
+      // - 软超时 (15s)：最后一次有实际内容的事件后 15 秒无新内容则 finalize
+      // - 硬超时 (3min)：绝对上限，无论有无事件都会 finalize，防止彻底卡死
+      const _autoFinalize = () => {
+        const s = get();
+        if (s.isStreaming || s.currentAiMessageId) {
+          console.warn('[store] 流式超时，自动 finalize');
+          _conversationFinalized = true; // 超时也标记对话完成，拦截后续迟到事件
+          if (s.currentAiText || s.currentAiThinking || s.toolCards.size > 0) {
+            finalizeStreamingAssistant();
+          } else {
+            set(resetStreamingState());
+          }
+          // 超时 finalize 后从历史恢复，确保不丢消息
+          if (s.currentSessionKey) {
+            setTimeout(() => get().loadHistory().catch(() => {}), 300);
+          }
+        }
+      };
+      _resetStreamingSoftTimeout(_autoFinalize);
+      _startStreamingHardTimeout(_autoFinalize);
 
       try {
         await apiClient.chatSend(sessionKey, content, gatewayAttachments);
@@ -1568,10 +1858,14 @@ export const useChatStore = create<ChatState>((set, get) => {
           content: `发送失败: ${(err as Error).message}`,
           createdAt: Date.now(),
         };
-        set((s) => ({
-          messages: [...s.messages, errMsg],
-          isStreaming: false,
-        }));
+        set((s) => {
+          const nextMessages = [...s.messages, errMsg];
+          sessionMessagesCache.set(sessionKey, nextMessages);
+          return {
+            messages: nextMessages,
+            isStreaming: false,
+          };
+        });
       }
     },
 
@@ -1606,6 +1900,9 @@ export const useChatStore = create<ChatState>((set, get) => {
     switchSession: (key: string) => {
       const state = get();
       const viewVersion = ++sessionViewVersion;
+      if (state.currentSessionKey && state.messages.length > 0) {
+        sessionMessagesCache.set(state.currentSessionKey, state.messages);
+      }
       // ——— 切换前：保存正在流式输出的 AI 消息到 DB + bgStreams ———
       _saveStreamingStateToDb(state);
 
@@ -1633,7 +1930,8 @@ export const useChatStore = create<ChatState>((set, get) => {
 
       set({
         currentSessionKey: key,
-        messages: [],
+        messages: sessionMessagesCache.get(key) || [],
+        isHistoryLoading: false,
         isStreaming: false,
         currentAiText: '',
         currentAiThinking: '',
@@ -1671,6 +1969,8 @@ export const useChatStore = create<ChatState>((set, get) => {
             const current = get();
             if (sessionViewVersion !== viewVersion || current.currentSessionKey !== key || current.currentAiMessageId !== bg.msgId) return;
 
+            const cachedMessages = sessionMessagesCache.get(key) || [];
+            const baseMessages = localMessages.length >= cachedMessages.length ? localMessages : cachedMessages;
             const partialMsg = localMessages.find((m) => m.id === bg.msgId);
             const mergedText = partialMsg && partialMsg.content.length > current.currentAiText.length
               ? partialMsg.content
@@ -1685,7 +1985,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             const mergedBlocks = stripThinkingBlocks(partialMsg?.blocks?.length ? partialMsg.blocks : current.currentBlocks) || [];
 
             set({
-              messages: localMessages
+              messages: baseMessages
                 .filter((m) => m.id !== bg.msgId)
                 .map(hideThinkingForDisplay),
               currentAiText: mergedText,
@@ -1696,6 +1996,10 @@ export const useChatStore = create<ChatState>((set, get) => {
               _blockTextBase: mergedText.length,
               isStreaming: true,
             });
+            sessionMessagesCache.set(
+              key,
+              baseMessages.filter((m) => m.id !== bg.msgId).map(hideThinkingForDisplay)
+            );
           })
           .catch(() => {});
         return;
@@ -1727,6 +2031,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       set({
         currentSessionKey: newKey,
         messages: [],
+        isHistoryLoading: false,
         isStreaming: false,
         currentAiText: '',
         currentAiThinking: '',
@@ -1749,6 +2054,18 @@ export const useChatStore = create<ChatState>((set, get) => {
       if (!sessionKey || !apiClient.gatewayReady) return;
       const requestSerial = ++historyRequestSerial;
       const viewVersion = sessionViewVersion;
+      set({ isHistoryLoading: true });
+
+      const finishHistoryLoading = () => {
+        const current = get();
+        if (
+          requestSerial === historyRequestSerial
+          && viewVersion === sessionViewVersion
+          && current.currentSessionKey === sessionKey
+        ) {
+          set({ isHistoryLoading: false });
+        }
+      };
 
       try {
         const result = (await apiClient.chatHistory(sessionKey)) as {
@@ -1764,7 +2081,11 @@ export const useChatStore = create<ChatState>((set, get) => {
             return;
           }
           if (localMessages.length > 0) {
-            set({ messages: localMessages.map(hideThinkingForDisplay) });
+            const nextMessages = dedupeMessages(localMessages.map(hideThinkingForDisplay));
+            sessionMessagesCache.set(sessionKey, nextMessages);
+            set({ messages: nextMessages, isHistoryLoading: false });
+          } else {
+            finishHistoryLoading();
           }
           return;
         }
@@ -2159,7 +2480,9 @@ export const useChatStore = create<ChatState>((set, get) => {
         if (requestSerial !== historyRequestSerial || viewVersion !== sessionViewVersion || get().currentSessionKey !== sessionKey) {
           return;
         }
-        set({ messages: messages.map(hideThinkingForDisplay) });
+        const nextMessages = dedupeMessages(messages.map(hideThinkingForDisplay));
+        sessionMessagesCache.set(sessionKey, nextMessages);
+        set({ messages: nextMessages, isHistoryLoading: false });
       } catch (e) {
         console.error('[store] loadHistory error:', e);
         // 出错时回退到本地 DB
@@ -2169,9 +2492,15 @@ export const useChatStore = create<ChatState>((set, get) => {
             return;
           }
           if (localMessages.length > 0) {
-            set({ messages: localMessages.map(hideThinkingForDisplay) });
+            const nextMessages = dedupeMessages(localMessages.map(hideThinkingForDisplay));
+            sessionMessagesCache.set(sessionKey, nextMessages);
+            set({ messages: nextMessages, isHistoryLoading: false });
+          } else {
+            finishHistoryLoading();
           }
-        } catch (_) { /* ignore */ }
+        } catch (_) {
+          finishHistoryLoading();
+        }
       }
     },
 
@@ -2207,23 +2536,25 @@ export const useChatStore = create<ChatState>((set, get) => {
         const localSessions = await db.getSessions();
         const localTitleMap = new Map<string, string>();
         for (const ls of localSessions) {
-          if (ls.title && ls.title !== '新对话' && ls.title !== '主对话') {
+          if (!isPlaceholderSessionTitle(ls.title)) {
             localTitleMap.set(ls.key, ls.title);
           }
         }
 
         const sessionsFromGateway: Session[] = filteredSessions.map((s) => {
           // 标题优先级：本地DB > 服务端持久化 > Gateway返回 > lastMessage推断 > sessionKey解析
+          const serverTitle = !isPlaceholderSessionTitle(serverTitles[s.key]) ? serverTitles[s.key] : undefined;
+          const gatewayTitle = !isPlaceholderSessionTitle(s.title) ? s.title : undefined;
           let title = localTitleMap.get(s.key)
-            || serverTitles[s.key]
-            || s.title;
+            || serverTitle
+            || gatewayTitle;
 
           // 如果有服务端标题但本地没有，同步到本地 DB
-          if (!localTitleMap.get(s.key) && serverTitles[s.key]) {
-            db.updateSessionTitle(s.key, serverTitles[s.key]).catch(() => {});
+          if (!localTitleMap.get(s.key) && serverTitle) {
+            db.updateSessionTitle(s.key, serverTitle).catch(() => {});
           }
 
-          if (!title || title === s.key || /^agent:/.test(title)) {
+          if (!title || isPlaceholderSessionTitle(title) || title === s.key || /^agent:/.test(title)) {
             if (s.lastMessage) {
               title = generateSessionTitle(s.lastMessage);
             } else {
@@ -2250,12 +2581,12 @@ export const useChatStore = create<ChatState>((set, get) => {
 
         // 对于仍然是"新对话"的会话，异步尝试从聊天记录生成标题
         for (const sess of sessions) {
-          if (sess.title === '新对话' || sess.title === '主对话') {
+          if (isPlaceholderSessionTitle(sess.title)) {
             // 用 lastMessage 生成，或异步加载首条用户消息
             get().loadFirstUserMessage(sess.key).then((firstMsg: string | null) => {
               if (firstMsg) {
                 const betterTitle = generateSessionTitle(firstMsg);
-                if (betterTitle && betterTitle !== '新对话') {
+                if (betterTitle && !isPlaceholderSessionTitle(betterTitle)) {
                   // 更新 sessions 状态
                   set((s) => ({
                     sessions: s.sessions.map((item) =>
@@ -2403,11 +2734,11 @@ function extractSessionTitle(key: string): string {
   const parts = key.split(':');
   if (parts.length >= 3) {
     const channel = parts.slice(2).join(':');
-    // clawchat-{user} 格式: 主对话
-    if (/^clawchat-[^-]+$/.test(channel)) return '主对话';
+    // clawchat-{user} / clawchat-{user}-{suffix} 都显示为新对话
+    if (/^clawchat-[^-]+$/.test(channel)) return '新对话';
     // clawchat-{user}-{suffix} 格式: 新对话
     if (/^clawchat-.+-.+$/.test(channel)) return '新对话';
-    if (channel === 'main') return '主对话';
+    if (channel === 'main') return '新对话';
     return channel.length > 20 ? channel.substring(0, 20) + '…' : channel;
   }
   return key;

@@ -128,6 +128,23 @@ function expandAssistantMessages(messages: Message[]): Message[] {
   return expanded;
 }
 
+function buildMessageRenderSignature(message: Message): string {
+  const blockSig = message.blocks?.map((block) => `${block.type}:${block.toolCallId || ''}:${block.content || ''}`).join('|') || '';
+  const toolSig = message.toolCalls?.map((tc) => `${tc.id}:${tc.name}:${tc.status}:${tc.input || ''}:${tc.output || ''}`).join('|') || '';
+  const attSig = message.attachments?.map((att) => `${att.id}:${att.name}:${att.url || ''}:${att.size}`).join('|') || '';
+  return [
+    message.id,
+    message.role,
+    message.content,
+    message.thinking || '',
+    blockSig,
+    toolSig,
+    attSig,
+    message.isStreaming ? '1' : '0',
+    String(message.createdAt || 0),
+  ].join('::');
+}
+
 function extractThinkingContent(text: string): string {
   const matches = Array.from(text.matchAll(/<thinking>([\s\S]*?)<\/thinking>/gi))
     .map((match) => match[1]?.trim())
@@ -151,15 +168,19 @@ function stripOperatorInjectedContent(text: string): string {
       ''
     )
     .replace(/^##\s*(?:System|Operator)\s+(?:Message|Instructions?)[\s\S]*?(?=\n{2,}|$)/gim, '')
+    .replace(
+      /^(?:\s*System:\s*\[[^\]]+\]\s*Exec completed\s*\([^)]+\)\s*::\s*[\s\S]*?(?=(?:\s*System:\s*\[[^\]]+\]\s*Exec completed|\s*\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-|$)))+/i,
+      ''
+    )
     .trim();
 }
 
 function stripTimestampPrefix(text: string): string {
   return text
-    .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|[A-Z]{2,5})?\]\s*/gi, '')
+    .replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:(?:UTC|GMT)(?:[+-]\d{1,2})?|[A-Z]{2,5})?\]\s*/gi, '')
     .replace(/^\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\]\s*/g, '')
     .replace(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\s*\n/g, '')
-    .replace(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:UTC|GMT|[A-Z]{2,5})?\s*\n/gi, '')
+    .replace(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:(?:UTC|GMT)(?:[+-]\d{1,2})?|[A-Z]{2,5})?\s*\n/gi, '')
     .replace(/^\[\d{2}:\d{2}(?::\d{2})?\]\s*/g, '')
     .replace(/^\d{13,}\s*\n/g, '')
     .trim();
@@ -461,6 +482,7 @@ async function saveDownloadedFile(blob: Blob, fileName: string): Promise<string 
 export default function ChatPage() {
   const {
     messages,
+    isHistoryLoading,
     sessions,
     currentSessionKey,
     isStreaming,
@@ -507,6 +529,8 @@ export default function ChatPage() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isUserNearBottomRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
+  const expandedMessagesCacheRef = useRef<Map<string, { signature: string; expanded: Message[] }>>(new Map());
+  const isBlockingOverlayOpen = showHistoryDetail || showFileBrowser;
 
   // 检测用户是否在底部附近（80px 阈值）
   const handleScroll = useCallback(() => {
@@ -518,6 +542,7 @@ export default function ChatPage() {
 
   // 自动滚动到底部 — 仅当用户在底部时触发，使用 rAF 避免抖动
   useEffect(() => {
+    if (isBlockingOverlayOpen) return;
     if (!isUserNearBottomRef.current) return;
     const el = scrollContainerRef.current;
     if (!el) return;
@@ -535,6 +560,7 @@ export default function ChatPage() {
     currentBlocks.length,
     toolCards.size,
     currentAiMessageId,
+    isBlockingOverlayOpen,
   ]);
 
   // 切换会话时强制滚到底部
@@ -623,6 +649,7 @@ export default function ChatPage() {
   const hasToolCards = toolCards.size > 0;
 
   const liveBlocks = useMemo(() => {
+    if (isBlockingOverlayOpen) return undefined;
     if (!currentBlocks.length && !currentAiThinking && !currentAiText) return undefined;
     const blocks = [...currentBlocks];
     // 补全当前 thinking 段
@@ -642,20 +669,24 @@ export default function ChatPage() {
       }
     }
     return blocks.length > 0 ? blocks : undefined;
-  }, [currentBlocks, currentAiThinking, currentAiText, _blockThinkingBase, _blockTextBase]);
+  }, [currentBlocks, currentAiThinking, currentAiText, _blockThinkingBase, _blockTextBase, isBlockingOverlayOpen]);
 
   // 构造显示用的消息列表
   const displayMessages = useMemo(() => {
+    if (isBlockingOverlayOpen) return messages;
     const nextMessages = [...messages];
-    if (!(currentAiText || hasToolCards || currentAiThinking)) {
+    // 只有在流式进行中 (isStreaming=true) 且有实际内容时，才叠加流式覆盖消息。
+    // 防止 finalize 后残留的 currentAiText 产生幽灵消息。
+    if (!isStreaming || !(currentAiText || hasToolCards || currentAiThinking)) {
       return nextMessages;
     }
 
     const msgId = currentAiMessageId || 'ai-streaming';
     const existing = nextMessages.find((m) => m.id === msgId);
-    if (!existing) {
+    const liveMessageId = existing && !existing.isStreaming ? `${msgId}::live` : msgId;
+    if (!existing || (existing && !existing.isStreaming)) {
       nextMessages.push({
-        id: msgId,
+        id: liveMessageId,
         sessionKey: currentSessionKey || '',
         role: 'assistant',
         content: currentAiText || '',
@@ -663,7 +694,7 @@ export default function ChatPage() {
         toolCalls: Array.from(toolCards.values()),
         blocks: liveBlocks,
         createdAt: Date.now(),
-        isStreaming: true,
+        isStreaming,
       });
       return nextMessages;
     }
@@ -675,20 +706,40 @@ export default function ChatPage() {
       thinking: currentAiThinking || existing.thinking,
       blocks: liveBlocks || existing.blocks,
       content: currentAiText || existing.content,
-      isStreaming: true,
+      isStreaming,
     };
     return nextMessages;
-  }, [messages, currentAiText, hasToolCards, currentAiThinking, currentAiMessageId, currentSessionKey, toolCards, liveBlocks]);
+  }, [messages, currentAiText, hasToolCards, currentAiThinking, currentAiMessageId, currentSessionKey, toolCards, liveBlocks, isStreaming, isBlockingOverlayOpen]);
 
-  const renderedMessages = useMemo(() => expandAssistantMessages(displayMessages), [displayMessages]);
+  const renderedMessages = useMemo(
+    () => {
+      if (isBlockingOverlayOpen) return messages;
 
-  const showThinkingPlaceholder = isStreaming && !currentAiText && !hasToolCards && !currentAiThinking;
+      const nextCache = new Map<string, { signature: string; expanded: Message[] }>();
+      const expanded: Message[] = [];
+
+      for (const message of displayMessages) {
+        const signature = buildMessageRenderSignature(message);
+        const cached = expandedMessagesCacheRef.current.get(message.id);
+        const expandedEntry = cached && cached.signature === signature
+          ? cached.expanded
+          : (message.role === 'assistant' ? splitAssistantMessage(message) : [message]);
+        nextCache.set(message.id, { signature, expanded: expandedEntry });
+        expanded.push(...expandedEntry);
+      }
+
+      expandedMessagesCacheRef.current = nextCache;
+      return expanded;
+    },
+    [displayMessages, messages, isBlockingOverlayOpen]
+  );
+
+  const showThinkingPlaceholder = !isBlockingOverlayOpen && isStreaming && !currentAiText && !hasToolCards && !currentAiThinking;
+  const showPageLoading = !isBlockingOverlayOpen && isHistoryLoading && displayMessages.length === 0 && !showThinkingPlaceholder;
 
   const currentSession = sessions.find((s) => s.key === currentSessionKey);
   const currentTitleRaw = currentSession?.title || (currentSessionKey ? extractTitle(currentSessionKey) : appName);
-  const currentTitle = currentTitleRaw === '主对话'
-    ? t('mainSessionTitle')
-    : currentTitleRaw === '新对话'
+  const currentTitle = (currentTitleRaw === '主对话' || currentTitleRaw === '新对话')
     ? t('newSessionTitle')
     : currentTitleRaw;
 
@@ -812,7 +863,9 @@ export default function ChatPage() {
 
         {/* 消息区域 */}
         <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4">
-          {displayMessages.length === 0 && !showThinkingPlaceholder ? (
+          {isBlockingOverlayOpen ? null : showPageLoading ? (
+            <LoadingState label={t('loadingHistoryDetails')} />
+          ) : displayMessages.length === 0 && !showThinkingPlaceholder ? (
             <EmptyState />
           ) : (
             <>
@@ -1088,11 +1141,11 @@ function extractTitle(key: string): string {
 
     let label: string;
     if (/^clawchat-[^-]+$/.test(channel)) {
-      label = '主对话';
+      label = '新对话';
     } else if (/^clawchat-.+-.+$/.test(channel)) {
       label = '新对话';
     } else if (channel === 'main') {
-      label = '主对话';
+      label = '新对话';
     } else {
       label = channel;
     }
@@ -1187,7 +1240,7 @@ function HistoryDetailModal({
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {loading ? (
-          <div className="text-sm text-th-text-muted">{t('loadingHistoryDetails')}</div>
+          <LoadingState label={t('loadingHistoryDetails')} />
         ) : error ? (
           <div className="text-sm text-red-400">{error}</div>
         ) : messages.length === 0 ? (
@@ -1260,7 +1313,7 @@ function FileBrowserModal({
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {loading ? (
-          <div className="text-sm text-th-text-muted">{t('loadingFiles')}</div>
+          <LoadingState label={t('loadingFiles')} />
         ) : error ? (
           <div className="text-sm text-red-400">{error}</div>
         ) : entries.length === 0 ? (
@@ -1318,6 +1371,15 @@ function FileBrowserModal({
 }
 
 /** 空状态提示 */
+function LoadingState({ label }: { label: string }) {
+  return (
+    <div className="h-full min-h-[160px] flex flex-col items-center justify-center gap-3 text-th-text-muted">
+      <div className="w-8 h-8 rounded-full border-2 border-th-border-subtle border-t-emerald-400 animate-spin" />
+      <div className="text-sm">{label}</div>
+    </div>
+  );
+}
+
 function EmptyState() {
   const { appName, t } = useLocale();
   return (

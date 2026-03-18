@@ -36,7 +36,7 @@ export default function SessionList({
 }: SessionListProps) {
   const { t, locale } = useLocale();
   const normalizeSessionTitle = (title: string) => {
-    if (title === '主对话') return t('mainSessionTitle');
+    if (title === '主对话') return t('newSessionTitle');
     if (title === '新对话') return t('newSessionTitle');
     return title;
   };

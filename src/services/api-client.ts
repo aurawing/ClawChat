@@ -465,7 +465,7 @@ export class ApiClient {
     return this.request('chat.send', params);
   }
 
-  chatHistory(sessionKey: string, limit = 200): Promise<unknown> {
+  chatHistory(sessionKey: string, limit = 1000): Promise<unknown> {
     return this.request('chat.history', { sessionKey, limit });
   }
 
