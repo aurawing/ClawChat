@@ -1,6 +1,6 @@
 {
   "name": "@claw_chat/clawchatfiles",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "ClawChat session-scoped file policy plugin for OpenClaw",
   "type": "module",
   "main": "./index.js",
