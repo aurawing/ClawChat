@@ -744,7 +744,7 @@ export default function ChatPage() {
     : currentTitleRaw;
 
   return (
-    <div className="h-screen flex bg-th-base">
+    <div className="flex h-full min-h-0 w-full bg-th-base">
       {/* 侧边栏遮罩 */}
       {showSidebar && (
         <div
@@ -755,7 +755,7 @@ export default function ChatPage() {
 
       {/* 侧边栏 */}
       <div
-        className={`fixed lg:relative inset-y-0 left-0 z-40 w-72 transition-transform duration-300 lg:translate-x-0 ${
+        className={`fixed lg:relative inset-y-0 left-0 z-40 h-full min-h-0 w-72 transition-transform duration-300 lg:translate-x-0 ${
           showSidebar ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
@@ -782,7 +782,7 @@ export default function ChatPage() {
       </div>
 
       {/* 主聊天区域 */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* 顶栏 */}
         <div className="flex items-center px-4 py-3 border-b border-th-border-subtle bg-th-base/80 backdrop-blur-sm safe-area-top">
           {/* 菜单按钮 */}
@@ -862,7 +862,7 @@ export default function ChatPage() {
         </div>
 
         {/* 消息区域 */}
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4">
+        <div ref={scrollContainerRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
           {isBlockingOverlayOpen ? null : showPageLoading ? (
             <LoadingState label={t('loadingHistoryDetails')} />
           ) : displayMessages.length === 0 && !showThinkingPlaceholder ? (
@@ -928,6 +928,25 @@ export default function ChatPage() {
           downloadingPath={downloadingBrowserPath}
           onClose={() => setShowFileBrowser(false)}
           onNavigate={(path) => setFileBrowserPath(path)}
+          onUpload={async (file) => {
+            if (!currentSessionKey) throw new Error(t('noActiveSessionError'));
+            // 上传成功后刷新当前目录列表
+            setFileBrowserLoading(true);
+            setFileBrowserError(null);
+            const fallbackRootName = locale === 'zh-CN' ? '文件' : 'Files';
+            try {
+              await apiClient.uploadSessionFile(currentSessionKey, fileBrowserPath, file);
+              const result = await apiClient.listFiles(currentSessionKey, fileBrowserPath);
+              setFileBrowserRootName(result.rootName || fallbackRootName);
+              setFileBrowserPath(result.currentPath);
+              setFileBrowserParentPath(result.parentPath);
+              setFileBrowserEntries(result.entries);
+            } catch (e) {
+              throw new Error((e as Error)?.message || t('uploadFailed'));
+            } finally {
+              setFileBrowserLoading(false);
+            }
+          }}
           onDownload={async (path, options) => {
             try {
               setDownloadingBrowserPath(path);
@@ -1264,6 +1283,7 @@ function FileBrowserModal({
   onClose,
   onNavigate,
   onDownload,
+  onUpload,
 }: {
   rootName: string;
   currentPath: string;
@@ -1275,8 +1295,54 @@ function FileBrowserModal({
   onClose: () => void;
   onNavigate: (path: string) => void;
   onDownload: (path: string, options?: { archive?: boolean }) => void | Promise<void>;
+  onUpload: (file: { name: string; type: string; size: number; base64: string }) => Promise<void>;
 }) {
   const { t, locale } = useLocale();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const readFileAsBase64 = (file: File) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const base64 = result?.split(',')?.[1] || '';
+      resolve(base64);
+    };
+    reader.onerror = () => reject(new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+
+  const handlePickFile = () => {
+    if (uploading) return;
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: any) => {
+    const files: FileList | null = e?.target?.files || null;
+    const file = files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const base64 = await readFileAsBase64(file);
+      if (!base64) throw new Error(t('uploadFailed'));
+      await onUpload({
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        base64,
+      });
+    } catch (err) {
+      const msg = (err as Error)?.message || t('uploadFailed');
+      setUploadError(msg);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-th-base flex flex-col safe-area-bottom">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-th-border-subtle bg-th-base/95 backdrop-blur-sm safe-area-top">
@@ -1295,6 +1361,14 @@ function FileBrowserModal({
         </div>
         <div className="flex items-center gap-2">
           <button
+            onClick={handlePickFile}
+            disabled={uploading}
+            className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text disabled:opacity-50"
+            title={t('uploadAction')}
+          >
+            {uploading ? t('uploadingAction') : t('uploadAction')}
+          </button>
+          <button
             onClick={() => onDownload(currentPath, { archive: true })}
             className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
           >
@@ -1310,6 +1384,12 @@ function FileBrowserModal({
         )}
         </div>
       </div>
+
+      {uploadError && (
+        <div className="px-4 py-2 text-xs text-red-400 bg-red-500/10 border-b border-red-500/20">
+          {uploadError}
+        </div>
+      )}
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
         {loading ? (
@@ -1366,6 +1446,15 @@ function FileBrowserModal({
           </div>
         )}
       </div>
+
+      {/* 隐藏的文件 input：用于把本地文件上传到当前会话目录 */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        onChange={handleFileChange}
+        accept="*/*"
+      />
     </div>
   );
 }

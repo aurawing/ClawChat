@@ -968,6 +968,42 @@ function getUserSessionKey(userId) {
   return `${prefix}:clawchat-${userTag}`;
 }
 
+/**
+ * App「新建会话」会在默认 key 后追加 `-{suffix}`，此时尚未经过 /api/send，
+ * session.sessionKeys 里只有连接时的默认 key。上传前需按用户归属放行并登记 key。
+ */
+function isOwnedClawchatSessionKey(sk, session) {
+  if (!sk || !session) return false;
+  const userTag = String(session.userId || session.username || 'default');
+  const base = gw.defaultSessionKey || 'agent:main:main';
+  const parts = String(base).split(':');
+  const prefix = parts.length >= 2 ? `${parts[0]}:${parts[1]}` : 'agent:main';
+  const defaultKey = `${prefix}:clawchat-${userTag}`;
+  if (sk === defaultKey) return true;
+  if (sk.startsWith(`${defaultKey}-`)) return true;
+  return false;
+}
+
+/**
+ * 是否允许向 clawchatfiles 写入该 sessionKey 对应目录。
+ * 优先信任本连接已登记的 sessionKeys（含连接时下发的默认 key），并允许 `已登记key-后缀`（新建对话）。
+ * 这样客户端用的前缀与 Gateway 重连后 gw.defaultSessionKey 变化时仍一致，避免误报「无权限写入该会话目录」。
+ */
+function canProxyWriteSessionFiles(sk, session) {
+  if (!sk || !session) return false;
+  const key = String(sk);
+  if (session.sessionKeys?.has(key)) return true;
+  if (session.sessionKeys && session.sessionKeys.size > 0) {
+    for (const registered of session.sessionKeys) {
+      const r = String(registered || '');
+      if (!r) continue;
+      if (key === r) return true;
+      if (key.startsWith(`${r}-`)) return true;
+    }
+  }
+  return isOwnedClawchatSessionKey(key, session);
+}
+
 // ==================== 共享 Gateway 消息处理 ====================
 
 function handleGatewayMessage(rawData) {
@@ -1707,8 +1743,11 @@ app.post('/api/files/upload', async (req, res) => {
   const sk = String(sessionKey || '');
   if (!sk) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
 
-  // 多用户隔离：禁止把文件写进其它 sessionKey
-  if (!session.sessionKeys?.has(sk)) return res.status(403).json({ ok: false, error: '无权限写入该会话目录' });
+  // 多用户隔离：已登记 key、其 `-后缀` 派生（新对话）、或按用户归属推导
+  if (!canProxyWriteSessionFiles(sk, session)) {
+    return res.status(403).json({ ok: false, error: '无权限写入该会话目录' });
+  }
+  if (!session.sessionKeys.has(sk)) session.sessionKeys.add(sk);
 
   if (!base64 || typeof base64 !== 'string') return res.status(400).json({ ok: false, error: '缺少 base64 文件内容' });
   const fileNameStr = String(fileName || '').trim();

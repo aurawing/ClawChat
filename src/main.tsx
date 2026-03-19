@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Capacitor } from '@capacitor/core';
+import { Keyboard } from '@capacitor/keyboard';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import App from './App';
 import { applyLocaleSideEffects } from './i18n';
@@ -40,6 +41,17 @@ async function initNative() {
       root.style.setProperty('--safe-area-top', '0px');
       root.style.setProperty('--safe-area-bottom', '0px');
     }
+  } catch {
+    /* ignore */
+  }
+
+  // Android WebView：键盘收起后偶发视口高度未恢复，底部留一块空白；触发 resize 让布局重算
+  try {
+    await Keyboard.addListener('keyboardDidHide', () => {
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+    });
   } catch {
     /* ignore */
   }

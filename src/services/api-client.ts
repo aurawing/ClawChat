@@ -643,6 +643,41 @@ export class ApiClient {
     };
   }
 
+  async uploadSessionFile(
+    sessionKey: string,
+    dirPath: string,
+    file: { name: string; type: string; size: number; base64: string }
+  ): Promise<void> {
+    if (!this._baseUrl || !this._sid) throw new Error('未连接');
+    if (!sessionKey) throw new Error('缺少 sessionKey');
+    if (!file?.base64) throw new Error('缺少 base64');
+
+    const res = await fetch(`${this._baseUrl}/api/files/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sid: this._sid,
+        sessionKey,
+        path: dirPath || '',
+        fileName: file.name,
+        mimeType: file.type,
+        size: file.size,
+        base64: file.base64,
+      }),
+    });
+
+    if (!res.ok) {
+      let message = '上传失败';
+      try {
+        const data = await res.json();
+        message = data?.error || message;
+      } catch {
+        /* ignore */
+      }
+      throw new Error(message);
+    }
+  }
+
   async downloadBrowserFile(
     sessionKey: string,
     path: string,
