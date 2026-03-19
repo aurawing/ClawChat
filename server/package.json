@@ -1,6 +1,6 @@
 {
   "name": "@claw_chat/clawchat-proxy",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "ClawChat SSE+POST proxy server for OpenClaw Gateway",
   "license": "MIT",
   "type": "module",
