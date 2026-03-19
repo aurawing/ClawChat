@@ -1774,7 +1774,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
 
       if (isNewSession) {
-        const title = generateSessionTitle(content); // 用用户问题做标题
+        const title = generateSessionTitle(content);
         const newSession: Session = {
           key: sessionKey,
           title,
@@ -1784,10 +1784,24 @@ export const useChatStore = create<ChatState>((set, get) => {
         set((s) => ({
           sessions: [newSession, ...s.sessions],
         }));
-        // 立即持久化，避免被稍后一次 loadSessions 覆盖掉
         db.saveSession(newSession).catch(() => {});
         db.updateSessionTitle(sessionKey, title).catch(() => {});
         apiClient.saveSessionTitle(sessionKey, title).catch(() => {});
+      } else {
+        // 会话已在列表（如上传文件时自动创建）但标题仍是占位符，用第一条消息更新
+        const existing = state.sessions.find((s) => s.key === sessionKey);
+        const placeholder = existing?.title === '新对话' || existing?.title === 'New Chat' || existing?.title === '主对话';
+        if (placeholder && content.trim()) {
+          const title = generateSessionTitle(content);
+          const lastMessage = content.length > 40 ? content.substring(0, 40) + '…' : content;
+          set((s) => ({
+            sessions: s.sessions.map((sess) =>
+              sess.key === sessionKey ? { ...sess, title, lastMessage, updatedAt: Date.now() } : sess
+            ),
+          }));
+          db.updateSessionTitle(sessionKey, title).catch(() => {});
+          apiClient.saveSessionTitle(sessionKey, title).catch(() => {});
+        }
       }
 
       // 创建用户消息
@@ -2011,23 +2025,48 @@ export const useChatStore = create<ChatState>((set, get) => {
     /**
      * 新建会话 — 仅生成 sessionKey 并清空状态，
      * 不在列表中创建条目；等用户发送第一条消息时才创建。
+     * 如果当前已经是一个未使用的空会话（不在列表中且无消息），则复用该 key，
+     * 避免反复点加号产生大量废弃 sessionKey（及其对应的文件目录）。
      */
     createNewSession: () => {
-      // 切换前保存当前流式状态
       _saveStreamingStateToDb(get());
       sessionViewVersion++;
 
       const baseKey = apiClient.sessionKey;
       if (!baseKey) return;
-      // 从 agent:main:clawchat-xxx 提取 agent:main 前缀
-      const parts = baseKey.split(':');
-      const prefix = parts.slice(0, 2).join(':'); // 'agent:main'
+
       const state = get();
+      const currentKey = state.currentSessionKey;
+      const isCurrentInList = currentKey && state.sessions.some((s) => s.key === currentKey);
+      const hasMessages = state.messages.length > 0;
+
+      if (currentKey && !isCurrentInList && !hasMessages) {
+        // 当前已是空的新对话，复用同一个 key，只重置 UI 状态
+        set({
+          messages: [],
+          isHistoryLoading: false,
+          isStreaming: false,
+          currentAiText: '',
+          currentAiThinking: '',
+          currentAiMessageId: null,
+          currentRunId: null,
+          toolCards: new Map(),
+          currentBlocks: [],
+          _blockThinkingBase: 0,
+          _blockTextBase: 0,
+          _turnBaseText: '',
+          _lastTurnDelta: '',
+          lastAbortedUserMsgId: null,
+        });
+        return;
+      }
+
+      const parts = baseKey.split(':');
+      const prefix = parts.slice(0, 2).join(':');
       const userTag = state.userId || state.username || 'default';
-      const suffix = Date.now().toString(36); // 短时间戳作后缀
+      const suffix = Date.now().toString(36);
       const newKey = `${prefix}:clawchat-${userTag}-${suffix}`;
 
-      // 只切换到新 key、清空消息，不加入 sessions 列表
       set({
         currentSessionKey: newKey,
         messages: [],

@@ -9,7 +9,8 @@ import SessionList from '../components/SessionList';
 import { useTheme } from '../hooks/useTheme';
 import { useLocale } from '../hooks/useLocale';
 import { getAppName } from '../i18n';
-import type { ChatMessage, ContentBlock, FileAttachment, FileBrowserEntry, Message, MessageBlock, ServerConfig, ToolCall } from '../types';
+import type { ChatMessage, ContentBlock, FileAttachment, FileBrowserEntry, Message, MessageBlock, ServerConfig, Session, ToolCall } from '../types';
+import * as db from '../services/db';
 
 const APP_DOWNLOAD_SUBDIR = 'ClawChat';
 
@@ -525,6 +526,11 @@ export default function ChatPage() {
   const [fileBrowserLoading, setFileBrowserLoading] = useState(false);
   const [fileBrowserError, setFileBrowserError] = useState<string | null>(null);
   const [downloadingBrowserPath, setDownloadingBrowserPath] = useState<string | null>(null);
+  const [fileUploading, setFileUploading] = useState(false);
+  const [fileUploadProgress, setFileUploadProgress] = useState(0);
+  const [fileUploadFileName, setFileUploadFileName] = useState<string | null>(null);
+  const [fileUploadError, setFileUploadError] = useState<string | null>(null);
+  const fileUploadProgressTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isUserNearBottomRef = useRef(true);
@@ -928,23 +934,64 @@ export default function ChatPage() {
           downloadingPath={downloadingBrowserPath}
           onClose={() => setShowFileBrowser(false)}
           onNavigate={(path) => setFileBrowserPath(path)}
+          uploading={fileUploading}
+          uploadProgress={fileUploadProgress}
+          uploadFileName={fileUploadFileName}
+          uploadError={fileUploadError}
           onUpload={async (file) => {
             if (!currentSessionKey) throw new Error(t('noActiveSessionError'));
-            // 上传成功后刷新当前目录列表
-            setFileBrowserLoading(true);
-            setFileBrowserError(null);
+            setFileUploadError(null);
+            setFileUploadFileName(file.name);
+            setFileUploadProgress(0);
+            setFileUploading(true);
+
+            if (fileUploadProgressTimer.current) clearInterval(fileUploadProgressTimer.current);
+            fileUploadProgressTimer.current = setInterval(() => {
+              setFileUploadProgress((prev) => {
+                if (prev >= 90) return prev;
+                return prev + (90 - prev) * 0.08;
+              });
+            }, 200);
+
             const fallbackRootName = locale === 'zh-CN' ? '文件' : 'Files';
             try {
               await apiClient.uploadSessionFile(currentSessionKey, fileBrowserPath, file);
+              if (fileUploadProgressTimer.current) { clearInterval(fileUploadProgressTimer.current); fileUploadProgressTimer.current = null; }
+              setFileUploadProgress(100);
+
+              // 上传成功后，若当前会话不在列表中（新对话），立即注册，防止切走后丢失
+              const { sessions: curSessions } = useChatStore.getState();
+              if (!curSessions.some((s) => s.key === currentSessionKey)) {
+                const title = t('newSessionTitle');
+                const newSession: Session = {
+                  key: currentSessionKey,
+                  title,
+                  lastMessage: `[${file.name}]`,
+                  updatedAt: Date.now(),
+                };
+                useChatStore.setState((s) => ({ sessions: [newSession, ...s.sessions] }));
+                db.saveSession(newSession).catch(() => {});
+                apiClient.saveSessionTitle(currentSessionKey, title).catch(() => {});
+              }
+
               const result = await apiClient.listFiles(currentSessionKey, fileBrowserPath);
               setFileBrowserRootName(result.rootName || fallbackRootName);
               setFileBrowserPath(result.currentPath);
               setFileBrowserParentPath(result.parentPath);
               setFileBrowserEntries(result.entries);
+              setTimeout(() => {
+                setFileUploading(false);
+                setFileUploadProgress(0);
+                setFileUploadFileName(null);
+              }, 600);
             } catch (e) {
-              throw new Error((e as Error)?.message || t('uploadFailed'));
-            } finally {
-              setFileBrowserLoading(false);
+              if (fileUploadProgressTimer.current) { clearInterval(fileUploadProgressTimer.current); fileUploadProgressTimer.current = null; }
+              setFileUploading(false);
+              setFileUploadProgress(0);
+              setFileUploadFileName(null);
+              const msg = (e as Error)?.message || t('uploadFailed');
+              setFileUploadError(msg);
+              throw new Error(msg);
             }
           }}
           onDownload={async (path, options) => {
@@ -1280,6 +1327,10 @@ function FileBrowserModal({
   loading,
   error,
   downloadingPath,
+  uploading,
+  uploadProgress,
+  uploadFileName,
+  uploadError,
   onClose,
   onNavigate,
   onDownload,
@@ -1292,6 +1343,10 @@ function FileBrowserModal({
   loading: boolean;
   error: string | null;
   downloadingPath: string | null;
+  uploading: boolean;
+  uploadProgress: number;
+  uploadFileName: string | null;
+  uploadError: string | null;
   onClose: () => void;
   onNavigate: (path: string) => void;
   onDownload: (path: string, options?: { archive?: boolean }) => void | Promise<void>;
@@ -1299,8 +1354,6 @@ function FileBrowserModal({
 }) {
   const { t, locale } = useLocale();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const readFileAsBase64 = (file: File) => new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -1323,8 +1376,6 @@ function FileBrowserModal({
     const file = files?.[0];
     if (!file) return;
 
-    setUploading(true);
-    setUploadError(null);
     try {
       const base64 = await readFileAsBase64(file);
       if (!base64) throw new Error(t('uploadFailed'));
@@ -1334,21 +1385,22 @@ function FileBrowserModal({
         size: file.size,
         base64,
       });
-    } catch (err) {
-      const msg = (err as Error)?.message || t('uploadFailed');
-      setUploadError(msg);
+    } catch {
+      /* error is handled by parent via uploadError prop */
     } finally {
-      setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
+
+  const progressPercent = Math.min(100, Math.round(uploadProgress));
 
   return (
     <div className="fixed inset-0 z-50 bg-th-base flex flex-col safe-area-bottom">
       <div className="flex items-center gap-3 px-4 py-3 border-b border-th-border-subtle bg-th-base/95 backdrop-blur-sm safe-area-top">
         <button
           onClick={onClose}
-          className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted"
+          disabled={uploading}
+          className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-th-elevated transition-colors text-th-text-muted disabled:opacity-40"
           title={t('closeAction')}
         >
           <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1370,14 +1422,16 @@ function FileBrowserModal({
           </button>
           <button
             onClick={() => onDownload(currentPath, { archive: true })}
-            className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
+            disabled={uploading}
+            className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text disabled:opacity-50"
           >
             {t('archiveDownloadAction')}
           </button>
         {parentPath !== null && (
           <button
             onClick={() => onNavigate(parentPath)}
-            className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text"
+            disabled={uploading}
+            className="text-xs px-2 py-1 rounded-lg border border-th-border text-th-text-muted hover:text-th-text disabled:opacity-50"
           >
             {t('goParentAction')}
           </button>
@@ -1385,13 +1439,33 @@ function FileBrowserModal({
         </div>
       </div>
 
-      {uploadError && (
+      {uploading && (
+        <div className="px-4 pt-3 pb-2 border-b border-th-border-subtle bg-th-surface/50">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-th-text-muted truncate max-w-[60%]">
+              {t('uploadSending')}: {uploadFileName || '...'}
+            </span>
+            <span className="text-xs font-medium text-emerald-400 tabular-nums">{progressPercent}%</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-th-border/40 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-emerald-500 transition-all duration-300 ease-out"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {uploadError && !uploading && (
         <div className="px-4 py-2 text-xs text-red-400 bg-red-500/10 border-b border-red-500/20">
           {uploadError}
         </div>
       )}
 
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+      <div className="relative flex-1 min-h-0 overflow-y-auto px-4 py-4">
+        {uploading && (
+          <div className="absolute inset-0 z-10 bg-th-base/60 backdrop-blur-[1px]" />
+        )}
         {loading ? (
           <LoadingState label={t('loadingFiles')} />
         ) : error ? (
