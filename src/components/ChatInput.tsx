@@ -14,11 +14,14 @@ interface ChatInputProps {
 /**
  * 聊天输入组件 - 支持文本输入、文件上传、相机拍照
  */
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MB
+
 export default function ChatInput({ onSend, onStop, isGenerating, disabled }: ChatInputProps) {
   const { t } = useLocale();
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [sizeWarning, setSizeWarning] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -65,11 +68,18 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
       });
 
       if (photo.base64String) {
+        const rawBytes = Math.ceil(photo.base64String.length * 3 / 4);
+        if (rawBytes > MAX_ATTACHMENT_BYTES) {
+          setSizeWarning(true);
+          setTimeout(() => setSizeWarning(false), 4000);
+          setShowAttachMenu(false);
+          return;
+        }
         const att: FileAttachment = {
           id: uuidv4(),
           name: `photo_${Date.now()}.${photo.format}`,
           type: `image/${photo.format}`,
-          size: photo.base64String.length,
+          size: rawBytes,
           base64: photo.base64String,
           url: `data:image/${photo.format};base64,${photo.base64String}`,
         };
@@ -90,11 +100,18 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
       });
 
       if (photo.base64String) {
+        const rawBytes = Math.ceil(photo.base64String.length * 3 / 4);
+        if (rawBytes > MAX_ATTACHMENT_BYTES) {
+          setSizeWarning(true);
+          setTimeout(() => setSizeWarning(false), 4000);
+          setShowAttachMenu(false);
+          return;
+        }
         const att: FileAttachment = {
           id: uuidv4(),
           name: `image_${Date.now()}.${photo.format}`,
           type: `image/${photo.format}`,
-          size: photo.base64String.length,
+          size: rawBytes,
           base64: photo.base64String,
           url: `data:image/${photo.format};base64,${photo.base64String}`,
         };
@@ -115,7 +132,12 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
     const files = e.target.files;
     if (!files) return;
 
+    let oversized = false;
     Array.from(files).forEach((file) => {
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        oversized = true;
+        return;
+      }
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = (reader.result as string).split(',')[1];
@@ -132,6 +154,11 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
       reader.readAsDataURL(file);
     });
 
+    if (oversized) {
+      setSizeWarning(true);
+      setTimeout(() => setSizeWarning(false), 4000);
+    }
+
     e.target.value = '';
   }, []);
 
@@ -141,6 +168,12 @@ export default function ChatInput({ onSend, onStop, isGenerating, disabled }: Ch
 
   return (
     <div className="border-t border-th-border-subtle bg-th-base px-3 py-3 safe-area-bottom">
+      {/* 附件大小超限提示 */}
+      {sizeWarning && (
+        <div className="mb-2 px-3 py-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs text-center">
+          {t('attachmentTooLarge')}
+        </div>
+      )}
       {/* 附件预览 */}
       {attachments.length > 0 && (
         <div className="flex gap-2 mb-2 overflow-x-auto pb-1">

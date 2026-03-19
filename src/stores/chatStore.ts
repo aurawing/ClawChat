@@ -66,6 +66,8 @@ function stripOperatorInjectedContent(text: string): string {
     /\n*\[CLAWCHAT_DOC_CONTEXT_BEGIN\][\s\S]*?\[CLAWCHAT_DOC_CONTEXT_END\]\s*/g,
     ''
   );
+  // 去除不完整的 [CLAWCHAT_DOC_CONTEXT_BEGIN]（无 END 时，删除从此到结尾，避免显示残留）
+  text = text.replace(/\s*\[CLAWCHAT_DOC_CONTEXT_BEGIN\][\s\S]*$/g, '');
   // 去除 ClawChat 注入的文档正文上下文（兼容旧版：无边界标记）
   text = text.replace(
     /\n*以下是用户本轮上传文档中提取的正文内容，请结合这些内容回答。[^\S\r\n]*[\s\S]*$/g,
@@ -81,18 +83,26 @@ function stripOperatorInjectedContent(text: string): string {
 
 /** 去除消息开头的时间戳前缀 */
 function stripTimestampPrefix(text: string): string {
-  // [Fri 2026-03-13 05:49 UTC] 或 [Mon 2026-03-13 05:49:30 UTC] （带星期和时区）
-  text = text.replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:(?:UTC|GMT)(?:[+-]\d{1,2})?|[A-Z]{2,5})?\]\s*/gi, '');
-  // [2026-03-13 12:00:00] 或 [2026-03-13T12:00:00.000Z]
-  text = text.replace(/^\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\]\s*/g, '');
-  // 2026-03-13 12:00:00\n 或 2026-03-13T12:00:00.000Z\n（独占一行的时间戳）
-  text = text.replace(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\s*\n/g, '');
-  // Fri 2026-03-13 05:49 UTC\n（不带方括号，带星期和时区，独占一行）
-  text = text.replace(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:(?:UTC|GMT)(?:[+-]\d{1,2})?|[A-Z]{2,5})?\s*\n/gi, '');
-  // [12:00:00] 或 [12:00]
-  text = text.replace(/^\[\d{2}:\d{2}(?::\d{2})?\]\s*/g, '');
-  // 纯数字时间戳开头 (Unix ms) 后跟换行
-  text = text.replace(/^\d{13,}\s*\n/g, '');
+  // 循环去除开头的时间戳/元数据行，直到遇到非元数据内容
+  let prev = '';
+  while (prev !== text) {
+    prev = text;
+    // [Fri 2026-03-13 05:49 UTC] 或 [Mon 2026-03-13 05:49:30 UTC]
+    text = text.replace(/^\[(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:(?:UTC|GMT)(?:[+-]\d{1,2})?|[A-Z]{2,5})?\]\s*/gi, '');
+    // [2026-03-13 12:00:00] 或 [2026-03-13T12:00:00.000Z]
+    text = text.replace(/^\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\]\s*/g, '');
+    // ISO 8601 开头（无方括号）
+    text = text.replace(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\s*/g, '');
+    // 独占一行的时间戳
+    text = text.replace(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?\s*\n/g, '');
+    text = text.replace(/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?\s*(?:(?:UTC|GMT)(?:[+-]\d{1,2})?|[A-Z]{2,5})?\s*\n/gi, '');
+    // [12:00:00] 或 [12:00]
+    text = text.replace(/^\[\d{2}:\d{2}(?::\d{2})?\]\s*/g, '');
+    // 纯数字时间戳 (Unix ms)
+    text = text.replace(/^\d{13,}\s*\n/g, '');
+    // Human:/User: 等角色前缀（Gateway 可能注入）
+    text = text.replace(/^(?:Human|User|human|user)\s*:\s*/i, '');
+  }
   return text.trim();
 }
 
@@ -587,6 +597,10 @@ let sessionViewVersion = 0;
 // 此标记用于区分"一轮结束"和"整个对话结束"，防止后续轮次的事件被误拦。
 let _conversationFinalized = false;
 
+// agent 模式下是否已通过 agent.assistant 事件累积到文本
+// 用于判断 chat.delta 文本是否应作为后备参与累积
+let _agentAssistantTextReceived = false;
+
 // ==================== 流式超时保护 ====================
 // 软超时：最后一次收到 **有实际内容** 的事件后 15 秒无新内容，自动 finalize。
 // 硬超时：从 sendMessage 开始 3 分钟绝对上限，无论有无事件到达都会 finalize。
@@ -626,13 +640,22 @@ function stripThinkingBlocks(blocks?: MessageBlock[]): MessageBlock[] | undefine
   return filtered.length > 0 ? filtered : undefined;
 }
 
-function hideThinkingForDisplay(message: Message): Message {
-  if (message.role !== 'assistant') return message;
-  return {
-    ...message,
-    thinking: undefined,
-    blocks: stripThinkingBlocks(message.blocks),
-  };
+function cleanMessageForDisplay(message: Message): Message {
+  if (message.role === 'user' && message.content) {
+    const cleaned = stripTimestampPrefix(stripOperatorInjectedContent(message.content));
+    if (cleaned !== message.content) {
+      return { ...message, content: cleaned };
+    }
+    return message;
+  }
+  if (message.role === 'assistant') {
+    return {
+      ...message,
+      thinking: undefined,
+      blocks: stripThinkingBlocks(message.blocks),
+    };
+  }
+  return message;
 }
 
 function isPlaceholderSessionTitle(title?: string | null): boolean {
@@ -1147,34 +1170,22 @@ export const useChatStore = create<ChatState>((set, get) => {
         lastAbortedUserMsgId: null,
       };
 
-      // ====== Agent 模式下跳过文本/思维链累积 ======
-      // 当 agent 事件流（handleAgentEvent）正在运行时，
-      // 文本和思维链由 agent 事件准确分离后累积。
-      // chat 事件可能携带不同格式的相同内容（如不带 <think> 标签的纯文本），
-      // 导致思维链内容泄漏到 currentAiText 中出现重复。
-      // 因此在 agent 模式下仅处理 tool_use 块，跳过文本累积。
+      // ====== Agent 模式下的文本/思维链累积策略 ======
+      // agent 事件流（handleAgentEvent）能准确分离 thinking 和 text，优先使用。
+      // 若本轮 agent.assistant 尚未提供文本（_agentAssistantTextReceived=false），
+      // 则将 chat.delta 文本作为后备累积，避免文字丢失。
       const isAgentMode = !!(state.currentRunId || payload.runId);
-      if (!isAgentMode) {
-        // 文本累积（使用多轮累积辅助函数，防止重复追加）
+      const shouldAccumulateText = !isAgentMode || !_agentAssistantTextReceived;
+      if (shouldAccumulateText) {
         if (text) {
           const acc = accumulateText(text, state.currentAiText, state._turnBaseText, state._lastTurnDelta);
           updates.currentAiText = acc.text;
           updates._turnBaseText = acc.base;
           updates._lastTurnDelta = acc.delta;
         }
-        // 思维链累积
-        if (thinking) {
-          if (thinking.length > state.currentAiThinking.length) {
-            updates.currentAiThinking = thinking;
-          } else if (!state.currentAiThinking.endsWith(thinking)) {
-            updates.currentAiThinking = state.currentAiThinking
-              ? state.currentAiThinking + '\n\n---\n\n' + thinking
-              : thinking;
-          }
-        }
-      } else if (thinking) {
-        // agent 模式下仍允许 chat 事件补充 thinking；
-        // 只跳过 text，避免与 agent assistant 流重复累积正文。
+      }
+      // thinking 始终允许 chat 事件补充
+      if (thinking) {
         if (thinking.length > state.currentAiThinking.length) {
           updates.currentAiThinking = thinking;
         } else if (!state.currentAiThinking.endsWith(thinking)) {
@@ -1266,8 +1277,6 @@ export const useChatStore = create<ChatState>((set, get) => {
     }
 
     if (chatState === 'final') {
-      // chat.final 是对话的真正结束信号，标记对话已完成。
-      // 后续到达的 delta / agent 事件将被 _conversationFinalized 拦截。
       _conversationFinalized = true;
 
       const rawMessageText = extractRawMessageText(payload.message);
@@ -1275,15 +1284,36 @@ export const useChatStore = create<ChatState>((set, get) => {
       const thinking = rawMessageText ? extractThinkingContent(rawMessageText) : '';
       const currentText = state.currentAiText;
 
-      // 忽略空 final
-      if (!state.currentAiMessageId && !text) return;
+      const hasExistingAssistant = state.messages.some(
+        (m) => m.role === 'assistant' && m.sessionKey === state.currentSessionKey
+      );
+      const isAgentMode = !!state.currentRunId;
+
+      // 流式状态已被 lifecycle.end 完全重置 — 各轮内容已独立 finalize
+      const streamingFullyReset = !state.currentAiMessageId
+        && !currentText
+        && !state.currentAiThinking
+        && state.toolCards.size === 0;
+
+      if (streamingFullyReset && hasExistingAssistant) {
+        set(resetStreamingState());
+        return;
+      }
+      if (streamingFullyReset && !text) return;
+
+      // agent 模式下 chat.final 的 text 必为全轮合集，绝不使用。
+      // 若无 currentText 则跳过（lifecycle.end 会负责 finalize）
+      if (isAgentMode && !currentText && !state.currentAiThinking && state.toolCards.size === 0) {
+        set(resetStreamingState());
+        return;
+      }
 
       const msgId = state.currentAiMessageId || resolveStreamingAssistantMessageId(state, payload.message?.id as string | undefined);
-      const payloadLooksLeaked = !!text && looksLikeTranscriptLeak(text, state.messages);
-      const currentLooksLeaked = !!currentText && looksLikeTranscriptLeak(currentText, state.messages);
-      const finalText = payloadLooksLeaked && currentText && !currentLooksLeaked
+
+      // agent 模式下绝不使用 chat.final 的 text（必为全轮合集），只用 currentAiText
+      const finalText = isAgentMode
         ? currentText
-        : (text || currentText);
+        : (hasExistingAssistant && currentText ? currentText : (text || currentText));
       const finalThinking = thinking || state.currentAiThinking;
 
       const lastAssistantMsg = [...state.messages]
@@ -1307,14 +1337,10 @@ export const useChatStore = create<ChatState>((set, get) => {
           createdAt: Date.now(),
         });
         if (hadNoAssistantReply) {
-          // 同时刷新会话列表（确保新会话出现在列表中）
           setTimeout(() => get().loadSessions(), 500);
         }
-        if (payloadLooksLeaked || currentLooksLeaked) {
-          setTimeout(() => {
-            get().loadHistory().catch(() => {});
-          }, 0);
-        }
+        // 不再在 chat.final 后触发 loadHistory，
+        // 实时累积的消息已经是最完整的，loadHistory 可能用旧数据覆盖。
       } else {
         set(resetStreamingState());
       }
@@ -1428,15 +1454,23 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     if (stream === 'lifecycle') {
       if (data?.phase === 'start') {
-        // 如果整个对话已经被 chat.final 标记为完成，忽略迟到的 lifecycle.start。
-        // 但如果只是某一轮结束（lifecycle end），下一轮的 start 应该放行。
         if (_conversationFinalized) return;
+        _agentAssistantTextReceived = false;
+        // 新轮次开始：清空上一轮的流式累积，避免 agent.assistant 的累积文本跨轮拼接
         set({
           isStreaming: true,
           currentRunId: payload.runId || null,
+          currentAiMessageId: null,
           lastAbortedUserMsgId: null,
+          currentAiText: '',
+          currentAiThinking: '',
+          toolCards: new Map(),
+          currentBlocks: [],
+          _turnBaseText: '',
+          _lastTurnDelta: '',
+          _blockThinkingBase: 0,
+          _blockTextBase: 0,
         });
-        // lifecycle.start 重置软超时（相当于"流刚开始"）
         _resetStreamingSoftTimeout(() => {
           const s = get();
           if (s.isStreaming && s.currentAiMessageId) {
@@ -1456,12 +1490,10 @@ export const useChatStore = create<ChatState>((set, get) => {
         if (hasPendingContent) {
           finalizeStreamingAssistant();
         } else {
+          // 不触发 loadHistory — 会话可能还在进行中，
+          // loadHistory 会覆盖实时累积的消息。
+          // 缺失的内容会在 chat.final 时通过完整文本补回。
           set(resetStreamingState());
-          // 没有累积到任何内容但 lifecycle 结束了，说明文本可能通过 chat 通道传递
-          // 延迟加载历史确保消息不丢
-          if (current.currentSessionKey) {
-            setTimeout(() => get().loadHistory().catch(() => {}), 500);
-          }
         }
       }
       return;
@@ -1470,12 +1502,10 @@ export const useChatStore = create<ChatState>((set, get) => {
     // assistant 流 — 高频文本累积 + 思维链提取
     // 注意：agent 模式下工具调用之间，text 可能从头开始（新 turn）
     if (stream === 'assistant') {
-      // 只有 chat.final 后才忽略迟到的 assistant 事件。
       if (_conversationFinalized) return;
 
       const text = data?.text;
       if (text && typeof text === 'string') {
-        // 有实际文本内容时才重置软超时
         _resetStreamingSoftTimeout(() => {
           const s = get();
           if (s.isStreaming && s.currentAiMessageId) {
@@ -1493,6 +1523,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         };
 
         if (cleaned) {
+          _agentAssistantTextReceived = true;
           const acc = accumulateText(cleaned, state.currentAiText, state._turnBaseText, state._lastTurnDelta);
           updates.currentAiText = acc.text;
           updates._turnBaseText = acc.base;
@@ -1518,8 +1549,15 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     // tool 流
     if (stream === 'tool') {
-      // 只有 chat.final 后才忽略迟到的 tool 事件
       if (_conversationFinalized) return;
+      // 工具事件也重置软超时，防止长时间工具执行导致超时丢弃后续事件
+      _resetStreamingSoftTimeout(() => {
+        const s = get();
+        if (s.isStreaming && s.currentAiMessageId) {
+          console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
+          finalizeStreamingAssistant();
+        }
+      });
       const toolCallId = data?.toolCallId || data?.id || data?.tool_call_id;
       if (!toolCallId) return;
       const name = (data?.name as string) || (data?.tool_name as string) || 'tool';
@@ -1762,6 +1800,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       let sessionKey = state.currentSessionKey;
       if (!sessionKey) return;
 
+      // 使正在进行的 loadHistory 失效，防止异步完成时覆盖刚发送的消息
+      historyRequestSerial++;
+
       // ——— 如果当前 session 不在列表中，说明是新会话的第一条消息 ———
       const isNewSession = !state.sessions.some((s) => s.key === sessionKey);
       // 已存在的历史会话在重装/重开后，若消息尚未恢复出来，先补拉历史再发送，
@@ -1814,8 +1855,9 @@ export const useChatStore = create<ChatState>((set, get) => {
         createdAt: Date.now(),
       };
       const pendingAiMsgId = `ai-${uuid()}`;
-      // 新一轮对话开始，重置"对话已完成"标记，允许事件正常处理。
+      // 新一轮对话开始，重置标记
       _conversationFinalized = false;
+      _agentAssistantTextReceived = false;
       // 发送新问题前强制清空上一轮遗留的流式缓存，
       // 避免旧的 assistant 临时状态混入本轮，导致历史消失或最后一条串接前文。
       bgStreams.delete(sessionKey);
@@ -1847,15 +1889,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         const s = get();
         if (s.isStreaming || s.currentAiMessageId) {
           console.warn('[store] 流式超时，自动 finalize');
-          _conversationFinalized = true; // 超时也标记对话完成，拦截后续迟到事件
+          _conversationFinalized = true;
           if (s.currentAiText || s.currentAiThinking || s.toolCards.size > 0) {
             finalizeStreamingAssistant();
           } else {
             set(resetStreamingState());
-          }
-          // 超时 finalize 后从历史恢复，确保不丢消息
-          if (s.currentSessionKey) {
-            setTimeout(() => get().loadHistory().catch(() => {}), 300);
           }
         }
       };
@@ -2001,7 +2039,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             set({
               messages: baseMessages
                 .filter((m) => m.id !== bg.msgId)
-                .map(hideThinkingForDisplay),
+                .map(cleanMessageForDisplay),
               currentAiText: mergedText,
               currentAiThinking: '',
               toolCards: mergedToolCards,
@@ -2012,7 +2050,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             });
             sessionMessagesCache.set(
               key,
-              baseMessages.filter((m) => m.id !== bg.msgId).map(hideThinkingForDisplay)
+              baseMessages.filter((m) => m.id !== bg.msgId).map(cleanMessageForDisplay)
             );
           })
           .catch(() => {});
@@ -2120,7 +2158,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             return;
           }
           if (localMessages.length > 0) {
-            const nextMessages = dedupeMessages(localMessages.map(hideThinkingForDisplay));
+            const nextMessages = dedupeMessages(localMessages.map(cleanMessageForDisplay));
             sessionMessagesCache.set(sessionKey, nextMessages);
             set({ messages: nextMessages, isHistoryLoading: false });
           } else {
@@ -2206,7 +2244,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         for (const lm of localMessages) {
           if (lm.attachments && lm.attachments.length > 0) {
             localAttById.set(lm.id, lm.attachments);
-            const fuzzyKey = lm.content.substring(0, 50).trim();
+            const fuzzyKey = stripTimestampPrefix(stripOperatorInjectedContent(lm.content || '')).substring(0, 50).trim();
             if (fuzzyKey) localAttByText.set(fuzzyKey, lm.attachments);
             if (lm.role === 'user') {
               localUserMsgsWithAtt.push({ content: lm.content, attachments: lm.attachments });
@@ -2232,12 +2270,13 @@ export const useChatStore = create<ChatState>((set, get) => {
           }
         }
 
-        // 构建服务端附件匹配索引（按 messageText 前 50 字符分组）
+        // 构建服务端附件匹配索引（按 messageText 前 50 字符分组，需 strip 以与 Gateway 消息匹配）
         const serverAttByText = new Map<string, FileAttachment[]>();
         const serverAttOrdered: FileAttachment[][] = [];
-        let lastServerGroup = '__INIT__'; // 初始哨兵值，不同于空字符串
+        let lastServerGroup = '__INIT__';
         for (const sa of serverAttachments) {
-          const key = (sa.messageText || '').substring(0, 50).trim();
+          const raw = (sa.messageText || '').trim();
+          const key = stripTimestampPrefix(stripOperatorInjectedContent(raw)).substring(0, 50).trim();
           const att: FileAttachment = {
             id: sa.id,
             name: sa.name,
@@ -2519,7 +2558,20 @@ export const useChatStore = create<ChatState>((set, get) => {
         if (requestSerial !== historyRequestSerial || viewVersion !== sessionViewVersion || get().currentSessionKey !== sessionKey) {
           return;
         }
-        const nextMessages = dedupeMessages(messages.map(hideThinkingForDisplay));
+
+        // 如果当前正在流式输出且已有累积内容，说明实时对话正在进行，
+        // 不覆盖消息列表（实时累积的内容比 Gateway 历史更新）。
+        const liveCheck = get();
+        if (
+          liveCheck.isStreaming
+          && liveCheck.currentSessionKey === sessionKey
+          && (liveCheck.currentAiText || liveCheck.currentAiThinking || liveCheck.toolCards.size > 0 || liveCheck.messages.length > messages.length)
+        ) {
+          set({ isHistoryLoading: false });
+          return;
+        }
+
+        const nextMessages = dedupeMessages(messages.map(cleanMessageForDisplay));
         sessionMessagesCache.set(sessionKey, nextMessages);
         set({ messages: nextMessages, isHistoryLoading: false });
       } catch (e) {
@@ -2531,7 +2583,7 @@ export const useChatStore = create<ChatState>((set, get) => {
             return;
           }
           if (localMessages.length > 0) {
-            const nextMessages = dedupeMessages(localMessages.map(hideThinkingForDisplay));
+            const nextMessages = dedupeMessages(localMessages.map(cleanMessageForDisplay));
             sessionMessagesCache.set(sessionKey, nextMessages);
             set({ messages: nextMessages, isHistoryLoading: false });
           } else {
