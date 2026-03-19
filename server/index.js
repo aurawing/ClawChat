@@ -846,6 +846,15 @@ function resolvePluginFilePath(rawPath) {
   return null;
 }
 
+// 插件 resolve 会返回 absolutePath，但“目标文件可能尚不存在”（上传场景）。
+// 此函数只做路径映射，不要求路径已存在。
+function mapPluginAbsolutePathToLocal(rawPath) {
+  if (!rawPath || typeof rawPath !== 'string') return null;
+  const translated = translateDownloadPath(rawPath);
+  const candidates = [translated, resolve(rawPath)].filter(Boolean);
+  return candidates.length > 0 ? { absolutePath: candidates[0] } : null;
+}
+
 function buildArchiveName(name) {
   const base = String(name || 'archive')
     .replace(/[\\/:*?"<>|]/g, '_')
@@ -1685,6 +1694,95 @@ app.get('/api/files', async (req, res) => {
       return res.status(400).json({ ok: false, error: '当前路径不是目录' });
     }
     res.status(500).json({ ok: false, error: message || '加载文件列表失败' });
+  }
+});
+
+/** POST /api/files/upload — 上传文件到当前会话目录（通过 clawchatfiles 插件解析落盘位置） */
+app.post('/api/files/upload', async (req, res) => {
+  const { sid, sessionKey, path: rawDirPath, fileName, mimeType, size, base64 } = req.body || {};
+
+  const session = sessions.get(String(sid || ''));
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+
+  const sk = String(sessionKey || '');
+  if (!sk) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
+
+  // 多用户隔离：禁止把文件写进其它 sessionKey
+  if (!session.sessionKeys?.has(sk)) return res.status(403).json({ ok: false, error: '无权限写入该会话目录' });
+
+  if (!base64 || typeof base64 !== 'string') return res.status(400).json({ ok: false, error: '缺少 base64 文件内容' });
+  const fileNameStr = String(fileName || '').trim();
+  if (!fileNameStr) return res.status(400).json({ ok: false, error: '缺少 fileName' });
+
+  const safeMimeType = String(mimeType || 'application/octet-stream').trim();
+  const safeSize = Number.isFinite(Number(size)) ? Number(size) : undefined;
+
+  const safeDirPath = String(rawDirPath || '')
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .trim();
+
+  const safeBase64 = base64.startsWith('data:')
+    ? String(base64).replace(/^data:.*?;base64,/, '')
+    : base64;
+
+  const sanitizeFileName = (name) => {
+    return String(name || '')
+      .replace(/[\\/:*?"<>|\x00-\x1F]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\.+$/g, '') // 避免以 . 或 .. 结尾
+      || 'upload.bin';
+  };
+
+  // 防止用户在 fileName 里塞入路径分隔符，导致写入非目标目录
+  const safeFile = sanitizeFileName(fileNameStr).replace(/[\\/]/g, '_');
+
+  // client 传的是“目录”，插件 resolve 需要相对 session 根的“文件相对路径”
+  const fileRelativePath = safeDirPath ? `${safeDirPath}/${safeFile}` : safeFile;
+
+  try {
+    // 确保 session 目录存在（在第一次打开文件浏览页之前也可主动调用）
+    await callClawChatFilesRPC(String(sid || ''), 'ensure', { sessionKey: sk });
+
+    // 通过插件 resolve 校验相对路径是否越界，并拿到 absolutePath（即使文件不存在也会返回）
+    const resolved = await callClawChatFilesRPC(String(sid || ''), 'resolve', {
+      sessionKey: sk,
+      path: fileRelativePath,
+    });
+
+    if (!resolved?.absolutePath) {
+      return res.status(500).json({ ok: false, error: '解析失败：插件未返回可写入的路径' });
+    }
+
+    const localTarget = mapPluginAbsolutePathToLocal(resolved.absolutePath);
+    if (!localTarget?.absolutePath) {
+      return res.status(500).json({
+        ok: false,
+        error: '插件返回的文件路径在代理侧不可访问，请检查 OpenClaw 与代理的目录映射配置',
+      });
+    }
+
+    mkdirSync(dirname(localTarget.absolutePath), { recursive: true });
+    const buffer = Buffer.from(String(safeBase64), 'base64');
+    if (!buffer.length) {
+      return res.status(400).json({ ok: false, error: '文件内容为空或 base64 非法' });
+    }
+
+    writeFileSync(localTarget.absolutePath, buffer);
+
+    log.debug(`文件上传完成: ${safeFile} (${(buffer.length / 1024).toFixed(1)}KB) -> ${localTarget.absolutePath}`);
+    // 这里不需要保存 mimeType/size 到 SQLite：文件浏览由插件直接读目录即可
+    res.json({ ok: true, fileName: safeFile, mimeType: safeMimeType, size: safeSize ?? buffer.length });
+  } catch (e) {
+    const message = (e && e.message) || '';
+    if (/does not match plugin filter/i.test(message)) {
+      return res.status(400).json({ ok: false, error: '当前会话未启用 ClawChat 文件插件' });
+    }
+    if (/escapes session directory/i.test(message)) {
+      return res.status(400).json({ ok: false, error: '路径无效' });
+    }
+    res.status(500).json({ ok: false, error: message || '上传失败' });
   }
 });
 
