@@ -1825,6 +1825,190 @@ app.post('/api/files/upload', async (req, res) => {
   }
 });
 
+// ==================== 分片上传 ====================
+
+/** 追踪正在进行的分片上传 */
+const chunkedUploads = new Map(); // uploadId → { sid, sessionKey, fileName, mimeType, dirPath, tempDir, totalChunks, receivedChunks, createdAt }
+const CHUNKED_UPLOAD_TIMEOUT = 30 * 60 * 1000; // 30 分钟超时
+const CHUNKED_UPLOADS_BASE = join(DATA_DIR, 'chunked-tmp');
+mkdirSync(CHUNKED_UPLOADS_BASE, { recursive: true });
+
+// 定时清理超时的分片上传
+setInterval(() => {
+  const now = Date.now();
+  for (const [uploadId, info] of chunkedUploads) {
+    if (now - info.createdAt > CHUNKED_UPLOAD_TIMEOUT) {
+      log.info(`清理超时分片上传: ${uploadId}`);
+      try { rmSync(info.tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+      chunkedUploads.delete(uploadId);
+    }
+  }
+}, 5 * 60 * 1000);
+
+/** POST /api/files/upload/init — 初始化分片上传，返回 uploadId */
+app.post('/api/files/upload/init', async (req, res) => {
+  const { sid, sessionKey, path: rawDirPath, fileName, mimeType, totalChunks, totalSize } = req.body || {};
+
+  const session = sessions.get(String(sid || ''));
+  if (!session) return res.status(404).json({ ok: false, error: '会话不存在' });
+
+  const sk = String(sessionKey || '');
+  if (!sk) return res.status(400).json({ ok: false, error: '缺少 sessionKey' });
+  if (!canProxyWriteSessionFiles(sk, session)) {
+    return res.status(403).json({ ok: false, error: '无权限写入该会话目录' });
+  }
+  if (!session.sessionKeys.has(sk)) session.sessionKeys.add(sk);
+
+  const fileNameStr = String(fileName || '').trim();
+  if (!fileNameStr) return res.status(400).json({ ok: false, error: '缺少 fileName' });
+
+  const chunks = parseInt(totalChunks, 10);
+  if (!Number.isFinite(chunks) || chunks <= 0 || chunks > 10000) {
+    return res.status(400).json({ ok: false, error: 'totalChunks 无效' });
+  }
+
+  const uploadId = randomUUID();
+  const tempDir = join(CHUNKED_UPLOADS_BASE, uploadId);
+  mkdirSync(tempDir, { recursive: true });
+
+  const safeDirPath = String(rawDirPath || '').replace(/\\/g, '/').replace(/^\/+/, '').trim();
+
+  chunkedUploads.set(uploadId, {
+    sid: String(sid),
+    sessionKey: sk,
+    fileName: fileNameStr,
+    mimeType: String(mimeType || 'application/octet-stream'),
+    dirPath: safeDirPath,
+    tempDir,
+    totalChunks: chunks,
+    totalSize: Number(totalSize) || 0,
+    receivedChunks: new Set(),
+    createdAt: Date.now(),
+  });
+
+  log.debug(`分片上传初始化: ${uploadId} file=${fileNameStr} chunks=${chunks} size=${totalSize || '?'}`);
+  res.json({ ok: true, uploadId });
+});
+
+/** POST /api/files/upload/chunk — 接收单个分片 */
+app.post('/api/files/upload/chunk', (req, res) => {
+  const { uploadId, chunkIndex, base64 } = req.body || {};
+
+  const info = chunkedUploads.get(uploadId);
+  if (!info) return res.status(404).json({ ok: false, error: '上传会话不存在或已过期' });
+
+  const idx = parseInt(chunkIndex, 10);
+  if (!Number.isFinite(idx) || idx < 0 || idx >= info.totalChunks) {
+    return res.status(400).json({ ok: false, error: 'chunkIndex 无效' });
+  }
+  if (!base64 || typeof base64 !== 'string') {
+    return res.status(400).json({ ok: false, error: '缺少 base64 数据' });
+  }
+
+  try {
+    const safeBase64 = base64.startsWith('data:')
+      ? String(base64).replace(/^data:.*?;base64,/, '')
+      : base64;
+    const buffer = Buffer.from(safeBase64, 'base64');
+    if (!buffer.length) return res.status(400).json({ ok: false, error: '分片内容为空' });
+
+    const chunkPath = join(info.tempDir, `chunk-${String(idx).padStart(6, '0')}`);
+    writeFileSync(chunkPath, buffer);
+    info.receivedChunks.add(idx);
+
+    log.debug(`分片上传: ${uploadId} chunk ${idx}/${info.totalChunks} (${(buffer.length / 1024).toFixed(1)}KB)`);
+    res.json({ ok: true, received: info.receivedChunks.size, total: info.totalChunks });
+  } catch (e) {
+    log.error(`分片写入失败: ${uploadId} chunk ${idx}:`, e.message);
+    res.status(500).json({ ok: false, error: '分片写入失败' });
+  }
+});
+
+/** POST /api/files/upload/complete — 合并分片并写入目标路径 */
+app.post('/api/files/upload/complete', async (req, res) => {
+  const { uploadId } = req.body || {};
+
+  const info = chunkedUploads.get(uploadId);
+  if (!info) return res.status(404).json({ ok: false, error: '上传会话不存在或已过期' });
+
+  // 检查是否所有分片已接收
+  if (info.receivedChunks.size < info.totalChunks) {
+    return res.status(400).json({
+      ok: false,
+      error: `分片不完整: 已收到 ${info.receivedChunks.size}/${info.totalChunks}`,
+    });
+  }
+
+  const sanitizeFileName = (name) => {
+    return String(name || '')
+      .replace(/[\\/:*?"<>|\x00-\x1F]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\.+$/g, '')
+      || 'upload.bin';
+  };
+
+  const safeFile = sanitizeFileName(info.fileName).replace(/[\\/]/g, '_');
+  const fileRelativePath = info.dirPath ? `${info.dirPath}/${safeFile}` : safeFile;
+
+  try {
+    // 确保 session 目录存在
+    await callClawChatFilesRPC(info.sid, 'ensure', { sessionKey: info.sessionKey });
+
+    // 通过插件 resolve 校验路径
+    const resolved = await callClawChatFilesRPC(info.sid, 'resolve', {
+      sessionKey: info.sessionKey,
+      path: fileRelativePath,
+    });
+
+    if (!resolved?.absolutePath) {
+      return res.status(500).json({ ok: false, error: '解析失败：插件未返回可写入的路径' });
+    }
+
+    const localTarget = mapPluginAbsolutePathToLocal(resolved.absolutePath);
+    if (!localTarget?.absolutePath) {
+      return res.status(500).json({
+        ok: false,
+        error: '插件返回的文件路径在代理侧不可访问，请检查 OpenClaw 与代理的目录映射配置',
+      });
+    }
+
+    mkdirSync(dirname(localTarget.absolutePath), { recursive: true });
+
+    // 合并分片到目标文件
+    const chunks = [];
+    for (let i = 0; i < info.totalChunks; i++) {
+      const chunkPath = join(info.tempDir, `chunk-${String(i).padStart(6, '0')}`);
+      if (!existsSync(chunkPath)) {
+        return res.status(500).json({ ok: false, error: `分片 ${i} 文件丢失` });
+      }
+      chunks.push(readFileSync(chunkPath));
+    }
+    const merged = Buffer.concat(chunks);
+    writeFileSync(localTarget.absolutePath, merged);
+
+    // 清理临时文件
+    try { rmSync(info.tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    chunkedUploads.delete(uploadId);
+
+    log.debug(`分片上传完成: ${safeFile} (${(merged.length / 1024 / 1024).toFixed(2)}MB) -> ${localTarget.absolutePath}`);
+    res.json({ ok: true, fileName: safeFile, mimeType: info.mimeType, size: merged.length });
+  } catch (e) {
+    const message = (e && e.message) || '';
+    // 清理临时文件
+    try { rmSync(info.tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    chunkedUploads.delete(uploadId);
+
+    if (/does not match plugin filter/i.test(message)) {
+      return res.status(400).json({ ok: false, error: '当前会话未启用 ClawChat 文件插件' });
+    }
+    if (/escapes session directory/i.test(message)) {
+      return res.status(400).json({ ok: false, error: '路径无效' });
+    }
+    res.status(500).json({ ok: false, error: message || '上传失败' });
+  }
+});
+
 /** POST /api/files/download — 下载当前会话目录下的文件（通过 clawchatfiles 插件解析） */
 app.post('/api/files/download', async (req, res) => {
   const { sid, sessionKey, path: rawPath, archive } = req.body || {};

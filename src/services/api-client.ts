@@ -678,6 +678,96 @@ export class ApiClient {
     }
   }
 
+  /**
+   * 分片上传大文件：使用 File.slice() 逐片读取和上传，
+   * 每次只有一个 chunk 的 base64 在内存中，避免 OOM。
+   */
+  static readonly CHUNK_SIZE = 1 * 1024 * 1024; // 1MB per chunk
+
+  async uploadSessionFileChunked(
+    sessionKey: string,
+    dirPath: string,
+    file: File,
+    onProgress?: (percent: number) => void
+  ): Promise<void> {
+    if (!this._baseUrl || !this._sid) throw new Error('未连接');
+    if (!sessionKey) throw new Error('缺少 sessionKey');
+
+    const chunkSize = ApiClient.CHUNK_SIZE;
+    const totalChunks = Math.ceil(file.size / chunkSize);
+
+    // 1. 初始化分片上传
+    const initRes = await fetch(`${this._baseUrl}/api/files/upload/init`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sid: this._sid,
+        sessionKey,
+        path: dirPath || '',
+        fileName: file.name,
+        mimeType: file.type,
+        totalChunks,
+        totalSize: file.size,
+      }),
+    });
+    const initData = await initRes.json().catch(() => ({} as Record<string, unknown>));
+    if (!initRes.ok) {
+      throw new Error((initData as Record<string, string>)?.error || '初始化上传失败');
+    }
+    const uploadId = (initData as Record<string, string>)?.uploadId;
+    if (!uploadId) throw new Error('服务端未返回 uploadId');
+
+    // 2. 逐片上传
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * chunkSize;
+      const end = Math.min(start + chunkSize, file.size);
+      const blob = file.slice(start, end);
+      const base64 = await ApiClient._readBlobAsBase64(blob);
+
+      const chunkRes = await fetch(`${this._baseUrl}/api/files/upload/chunk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadId, chunkIndex: i, base64 }),
+      });
+      if (!chunkRes.ok) {
+        const data = await chunkRes.json().catch(() => ({}));
+        throw new Error((data as Record<string, string>)?.error || `分片 ${i} 上传失败`);
+      }
+
+      // 报告进度：前 95% 按分片比例，最后 5% 留给 complete
+      if (onProgress) {
+        onProgress(Math.round(((i + 1) / totalChunks) * 95));
+      }
+    }
+
+    // 3. 完成合并
+    const completeRes = await fetch(`${this._baseUrl}/api/files/upload/complete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uploadId }),
+    });
+    if (!completeRes.ok) {
+      const data = await completeRes.json().catch(() => ({}));
+      throw new Error((data as Record<string, string>)?.error || '合并上传失败');
+    }
+
+    if (onProgress) onProgress(100);
+  }
+
+  /** 将 Blob 读取为纯 base64 字符串（不含 data: 前缀） */
+  private static _readBlobAsBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result as string;
+        const base64 = result?.split(',')?.[1] || '';
+        resolve(base64);
+      };
+      reader.onerror = () => reject(new Error('读取分片失败'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
   async downloadBrowserFile(
     sessionKey: string,
     path: string,

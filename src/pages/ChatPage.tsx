@@ -945,17 +945,41 @@ export default function ChatPage() {
             setFileUploadProgress(0);
             setFileUploading(true);
 
-            if (fileUploadProgressTimer.current) clearInterval(fileUploadProgressTimer.current);
-            fileUploadProgressTimer.current = setInterval(() => {
-              setFileUploadProgress((prev) => {
-                if (prev >= 90) return prev;
-                return prev + (90 - prev) * 0.08;
-              });
-            }, 200);
+            const CHUNKED_THRESHOLD = 5 * 1024 * 1024; // 5MB
+            const useChunked = file.size > CHUNKED_THRESHOLD;
+
+            // 小文件：模拟进度动画；大文件：使用真实进度
+            if (!useChunked) {
+              if (fileUploadProgressTimer.current) clearInterval(fileUploadProgressTimer.current);
+              fileUploadProgressTimer.current = setInterval(() => {
+                setFileUploadProgress((prev) => {
+                  if (prev >= 90) return prev;
+                  return prev + (90 - prev) * 0.08;
+                });
+              }, 200);
+            }
 
             const fallbackRootName = locale === 'zh-CN' ? '文件' : 'Files';
             try {
-              await apiClient.uploadSessionFile(currentSessionKey, fileBrowserPath, file);
+              if (useChunked) {
+                // 大文件：分片上传，直接传 File 对象
+                await apiClient.uploadSessionFileChunked(
+                  currentSessionKey, fileBrowserPath, file,
+                  (percent) => setFileUploadProgress(percent)
+                );
+              } else {
+                // 小文件：读取 base64 后一次性上传
+                const base64 = await new Promise<string>((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.onload = () => resolve((reader.result as string)?.split(',')?.[1] || '');
+                  reader.onerror = () => reject(new Error('读取文件失败'));
+                  reader.readAsDataURL(file);
+                });
+                if (!base64) throw new Error(t('uploadFailed'));
+                await apiClient.uploadSessionFile(currentSessionKey, fileBrowserPath, {
+                  name: file.name, type: file.type, size: file.size, base64,
+                });
+              }
               if (fileUploadProgressTimer.current) { clearInterval(fileUploadProgressTimer.current); fileUploadProgressTimer.current = null; }
               setFileUploadProgress(100);
 
@@ -1350,21 +1374,10 @@ function FileBrowserModal({
   onClose: () => void;
   onNavigate: (path: string) => void;
   onDownload: (path: string, options?: { archive?: boolean }) => void | Promise<void>;
-  onUpload: (file: { name: string; type: string; size: number; base64: string }) => Promise<void>;
+  onUpload: (file: File) => Promise<void>;
 }) {
   const { t, locale } = useLocale();
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const readFileAsBase64 = (file: File) => new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      const base64 = result?.split(',')?.[1] || '';
-      resolve(base64);
-    };
-    reader.onerror = () => reject(new Error('读取文件失败'));
-    reader.readAsDataURL(file);
-  });
 
   const handlePickFile = () => {
     if (uploading) return;
@@ -1377,14 +1390,7 @@ function FileBrowserModal({
     if (!file) return;
 
     try {
-      const base64 = await readFileAsBase64(file);
-      if (!base64) throw new Error(t('uploadFailed'));
-      await onUpload({
-        name: file.name,
-        type: file.type,
-        size: file.size,
-        base64,
-      });
+      await onUpload(file);
     } catch {
       /* error is handled by parent via uploadError prop */
     } finally {

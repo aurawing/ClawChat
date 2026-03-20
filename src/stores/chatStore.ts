@@ -597,6 +597,9 @@ let sessionViewVersion = 0;
 // 此标记用于区分"一轮结束"和"整个对话结束"，防止后续轮次的事件被误拦。
 let _conversationFinalized = false;
 
+// chat.final 已到达但 agent 仍在流式输出中 — 延迟到 lifecycle.end 后再阻断事件
+let _chatFinalPending = false;
+
 // agent 模式下是否已通过 agent.assistant 事件累积到文本
 // 用于判断 chat.delta 文本是否应作为后备参与累积
 let _agentAssistantTextReceived = false;
@@ -623,11 +626,14 @@ function _startStreamingHardTimeout(finalizeFn: () => void) {
     finalizeFn();
   }, STREAMING_HARD_TIMEOUT_MS);
 }
-function _clearStreamingTimeout() {
+function _clearSoftTimeout() {
   if (_streamingSoftHandle) {
     clearTimeout(_streamingSoftHandle);
     _streamingSoftHandle = null;
   }
+}
+function _clearAllTimeouts() {
+  _clearSoftTimeout();
   if (_streamingHardHandle) {
     clearTimeout(_streamingHardHandle);
     _streamingHardHandle = null;
@@ -994,8 +1000,27 @@ function _bgHandleChatEvent(payload: ChatEventPayload) {
 export const useChatStore = create<ChatState>((set, get) => {
   // ==================== 事件处理 ====================
 
+  // agent 模式下的软超时回调：不立即 finalize，而是检测是否仍在 agent 轮次中。
+  // 如果 currentRunId 存在（agent 仍在活动），则只重置超时以延长等待；
+  // 否则执行 finalize 保存已累积的内容。
+  const _agentSoftTimeoutFn = () => {
+    const s = get();
+    if (!s.isStreaming && !s.currentAiMessageId) return;
+    if (s.currentRunId) {
+      // agent 仍在活动中（可能在执行工具），不中断，延长等待
+      _resetStreamingSoftTimeout(_agentSoftTimeoutFn);
+      return;
+    }
+    console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
+    if (s.currentAiText || s.currentAiThinking || s.toolCards.size > 0) {
+      finalizeStreamingAssistant();
+    } else {
+      set(resetStreamingState());
+    }
+  };
+
   function resetStreamingState(): Partial<ChatState> {
-    _clearStreamingTimeout();
+    _clearSoftTimeout();
     return {
       isStreaming: false,
       currentAiText: '',
@@ -1153,13 +1178,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       // 只有当 delta 携带实际内容时才重置软超时（避免空心跳事件无限续命）
       const hasContentInDelta = !!(text || thinking || (Array.isArray(payload.message?.content) && payload.message!.content.length > 0));
       if (hasContentInDelta) {
-        _resetStreamingSoftTimeout(() => {
-          const s = get();
-          if (s.isStreaming && s.currentAiMessageId) {
-            console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
-            finalizeStreamingAssistant();
-          }
-        });
+        _resetStreamingSoftTimeout(_agentSoftTimeoutFn);
       }
       const msgId = resolveStreamingAssistantMessageId(state, payload.message?.id as string | undefined);
 
@@ -1277,8 +1296,6 @@ export const useChatStore = create<ChatState>((set, get) => {
     }
 
     if (chatState === 'final') {
-      _conversationFinalized = true;
-
       const rawMessageText = extractRawMessageText(payload.message);
       const text = extractText(payload.message);
       const thinking = rawMessageText ? extractThinkingContent(rawMessageText) : '';
@@ -1288,6 +1305,16 @@ export const useChatStore = create<ChatState>((set, get) => {
         (m) => m.role === 'assistant' && m.sessionKey === state.currentSessionKey
       );
       const isAgentMode = !!state.currentRunId;
+
+      // agent 模式下且正在流式输出：不立即阻断事件，
+      // 让当前轮次通过 lifecycle.end 正常完成后再标记结束
+      if (isAgentMode && state.isStreaming) {
+        _chatFinalPending = true;
+        return;
+      }
+
+      _conversationFinalized = true;
+      _clearAllTimeouts();
 
       // 流式状态已被 lifecycle.end 完全重置 — 各轮内容已独立 finalize
       const streamingFullyReset = !state.currentAiMessageId
@@ -1301,19 +1328,11 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
       if (streamingFullyReset && !text) return;
 
-      // agent 模式下 chat.final 的 text 必为全轮合集，绝不使用。
-      // 若无 currentText 则跳过（lifecycle.end 会负责 finalize）
-      if (isAgentMode && !currentText && !state.currentAiThinking && state.toolCards.size === 0) {
-        set(resetStreamingState());
-        return;
-      }
-
       const msgId = state.currentAiMessageId || resolveStreamingAssistantMessageId(state, payload.message?.id as string | undefined);
 
-      // agent 模式下绝不使用 chat.final 的 text（必为全轮合集），只用 currentAiText
-      const finalText = isAgentMode
+      const finalText = hasExistingAssistant && currentText
         ? currentText
-        : (hasExistingAssistant && currentText ? currentText : (text || currentText));
+        : (text || currentText);
       const finalThinking = thinking || state.currentAiThinking;
 
       const lastAssistantMsg = [...state.messages]
@@ -1471,13 +1490,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           _blockThinkingBase: 0,
           _blockTextBase: 0,
         });
-        _resetStreamingSoftTimeout(() => {
-          const s = get();
-          if (s.isStreaming && s.currentAiMessageId) {
-            console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
-            finalizeStreamingAssistant();
-          }
-        });
+        _resetStreamingSoftTimeout(_agentSoftTimeoutFn);
       }
       if (data?.phase === 'end') {
         const current = get();
@@ -1490,10 +1503,14 @@ export const useChatStore = create<ChatState>((set, get) => {
         if (hasPendingContent) {
           finalizeStreamingAssistant();
         } else {
-          // 不触发 loadHistory — 会话可能还在进行中，
-          // loadHistory 会覆盖实时累积的消息。
-          // 缺失的内容会在 chat.final 时通过完整文本补回。
           set(resetStreamingState());
+        }
+
+        // chat.final 在本轮期间已到达，现在轮次结束，正式标记对话完成
+        if (_chatFinalPending) {
+          _chatFinalPending = false;
+          _conversationFinalized = true;
+          _clearAllTimeouts();
         }
       }
       return;
@@ -1506,18 +1523,13 @@ export const useChatStore = create<ChatState>((set, get) => {
 
       const text = data?.text;
       if (text && typeof text === 'string') {
-        _resetStreamingSoftTimeout(() => {
-          const s = get();
-          if (s.isStreaming && s.currentAiMessageId) {
-            console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
-            finalizeStreamingAssistant();
-          }
-        });
+        _resetStreamingSoftTimeout(_agentSoftTimeoutFn);
         const thinking = extractThinkingContent(text);
         const cleaned = stripThinkingTags(text);
         const msgId = resolveStreamingAssistantMessageId(state);
 
         const updates: Partial<ChatState> = {
+          isStreaming: true,
           currentAiMessageId: msgId,
           currentRunId: payload.runId || state.currentRunId,
         };
@@ -1540,7 +1552,7 @@ export const useChatStore = create<ChatState>((set, get) => {
           }
         }
 
-        if (updates.currentAiText !== undefined || updates.currentAiThinking) {
+        if (updates.currentAiText !== undefined || updates.currentAiThinking || !state.isStreaming) {
           set(updates as ChatState);
         }
       }
@@ -1551,13 +1563,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     if (stream === 'tool') {
       if (_conversationFinalized) return;
       // 工具事件也重置软超时，防止长时间工具执行导致超时丢弃后续事件
-      _resetStreamingSoftTimeout(() => {
-        const s = get();
-        if (s.isStreaming && s.currentAiMessageId) {
-          console.warn('[store] 流式软超时 (15s 无新内容)，自动 finalize');
-          finalizeStreamingAssistant();
-        }
-      });
+      _resetStreamingSoftTimeout(_agentSoftTimeoutFn);
       const toolCallId = data?.toolCallId || data?.id || data?.tool_call_id;
       if (!toolCallId) return;
       const name = (data?.name as string) || (data?.tool_name as string) || 'tool';
@@ -1857,7 +1863,9 @@ export const useChatStore = create<ChatState>((set, get) => {
       const pendingAiMsgId = `ai-${uuid()}`;
       // 新一轮对话开始，重置标记
       _conversationFinalized = false;
+      _chatFinalPending = false;
       _agentAssistantTextReceived = false;
+      _clearAllTimeouts();
       // 发送新问题前强制清空上一轮遗留的流式缓存，
       // 避免旧的 assistant 临时状态混入本轮，导致历史消失或最后一条串接前文。
       bgStreams.delete(sessionKey);
@@ -1885,11 +1893,13 @@ export const useChatStore = create<ChatState>((set, get) => {
       // 启动双重超时保护：
       // - 软超时 (15s)：最后一次有实际内容的事件后 15 秒无新内容则 finalize
       // - 硬超时 (3min)：绝对上限，无论有无事件都会 finalize，防止彻底卡死
-      const _autoFinalize = () => {
+      // 硬超时回调：3 分钟绝对上限，即使 agent 仍在活动也强制结束
+      const _hardAutoFinalize = () => {
         const s = get();
         if (s.isStreaming || s.currentAiMessageId) {
-          console.warn('[store] 流式超时，自动 finalize');
+          console.warn('[store] 流式硬超时 (3min)，强制 finalize');
           _conversationFinalized = true;
+          _clearAllTimeouts();
           if (s.currentAiText || s.currentAiThinking || s.toolCards.size > 0) {
             finalizeStreamingAssistant();
           } else {
@@ -1897,8 +1907,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           }
         }
       };
-      _resetStreamingSoftTimeout(_autoFinalize);
-      _startStreamingHardTimeout(_autoFinalize);
+      _resetStreamingSoftTimeout(_agentSoftTimeoutFn);
+      _startStreamingHardTimeout(_hardAutoFinalize);
 
       try {
         await apiClient.chatSend(sessionKey, content, gatewayAttachments);
